@@ -1,0 +1,29 @@
+[package]
+name = "polybot-executor"
+version.workspace = true
+edition.workspace = true
+
+[features]
+live-signing = []
+
+[dependencies]
+tokio.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+reqwest.workspace = true
+ethers.workspace = true
+anyhow.workspace = true
+thiserror.workspace = true
+chrono.workspace = true
+uuid.workspace = true
+tracing.workspace = true
+async-trait = { workspace = true }
+hex = "0.4"
+sha3 = "0.10"
+hmac = "0.12"
+sha2 = "0.10"
+base64 = "0.22"
+rand = "0.8"
+polybot-risk = { path = "../risk" }
+polybot-scanner = { path = "../scanner" }
+polybot-api = { path = "../api" }

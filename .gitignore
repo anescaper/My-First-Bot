@@ -1,0 +1,31 @@
+# Rust build artifacts
+/target
+
+# Environment secrets — NEVER commit these
+.env
+*.pem
+*.key
+secrets/
+
+# Runtime data
+/data/
+backups/
+reports/
+*.db
+*.sqlite
+
+# Python
+.venv/
+__pycache__/
+*.pyc
+*.pyo
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db

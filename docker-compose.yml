@@ -1,0 +1,101 @@
+# =============================================================================
+# My-First-Bot — Docker Compose
+# =============================================================================
+# Runs 3 containers:
+#   1. strategy-service: Python FastAPI (port 8100) — runs trading strategies
+#   2. data-hub: Rust binary (port 4250) — market scanner, price feeds, round tracking
+#   3. polybot: Rust binary (port 4200) — main trading pipeline
+#
+# Usage:
+#   cp .env.example .env         # Fill in your credentials
+#   docker compose up -d         # Start all services
+#   docker compose logs -f       # Watch logs
+#   curl localhost:4200/health   # Check bot health
+#   curl -X POST localhost:4200/start -H "Authorization: Bearer $API_AUTH_TOKEN"
+# =============================================================================
+
+services:
+  # ---------------------------------------------------------------------------
+  # Python Strategy Service
+  # Runs Brownian Bridge + Hierarchical Cascade strategies.
+  # Receives prediction requests from the Rust pipeline via HTTP POST /predict.
+  # ---------------------------------------------------------------------------
+  strategy-service:
+    build:
+      context: ./python
+      dockerfile: Dockerfile
+    container_name: strategy-service
+    ports:
+      - "8100:8100"
+    environment:
+      - PYTHONUNBUFFERED=1
+    restart: unless-stopped
+
+  # ---------------------------------------------------------------------------
+  # Data Hub
+  # Scans Polymarket for active crypto rounds (BTC/ETH/SOL/XRP x 5m/15m/1h).
+  # Connects to Binance WebSocket for real-time spot prices.
+  # Tracks resolved rounds (up to 200) for Brownian Bridge parent-child lookups.
+  # Computes per-asset intel (candle trends, realized vol, displacement).
+  # ---------------------------------------------------------------------------
+  data-hub:
+    build:
+      context: .
+      dockerfile: Dockerfile.data-hub
+    container_name: data-hub
+    ports:
+      - "4250:4250"
+    environment:
+      - RUST_LOG=info
+      - PORT=4250
+      - CRYPTO_TIMEFRAMES=5m,15m,1h
+      - DB_PATH=/app/data/data-hub.db
+    volumes:
+      - hub-data:/app/data
+    restart: unless-stopped
+
+  # ---------------------------------------------------------------------------
+  # Trading Bot (Polybot)
+  # Main pipeline: fetches cycle data from data-hub, sends predictions to
+  # strategy-service, evaluates risk gates, submits GTC orders to Polymarket CLOB.
+  #
+  # Starts in paper mode by default. Switch to live with BOT_MODE=live.
+  # BANKROLL: how much USD to risk. Default $100.
+  # STRATEGY_PROFILE: "fair-value" uses Brownian Bridge + Hierarchical Cascade.
+  # ---------------------------------------------------------------------------
+  polybot:
+    build: .
+    container_name: polybot
+    ports:
+      - "4200:4200"
+    env_file:
+      - .env
+    environment:
+      - RUST_LOG=info
+      - PORT=4200
+      - INSTANCE_NAME=fair-value
+      - STRATEGY_PROFILE=fair-value
+      - BANKROLL=${BANKROLL:-100}
+      - DB_PATH=/app/data/polybot.db
+      - CRYPTO_EDGE_THRESHOLD=${CRYPTO_EDGE_THRESHOLD:-0.04}
+      - KELLY_FRACTION=${KELLY_FRACTION:-0.25}
+      - STRATEGY_SERVICE_URL=http://strategy-service:8100
+      - CRYPTO_STOP_LOSS_PCT=0.50
+      - MIN_ENTRY_PRICE=0.12
+      - MAX_ENTRY_PRICE=0.88
+      - CRYPTO_TIMEFRAMES=5m,15m,1h
+      - TRADING_FEE_BPS=200
+      - DATA_HUB_URL=http://data-hub:4250
+      - MAX_POSITIONS=${MAX_POSITIONS:-6}
+      - MAX_SAME_DIRECTION=${MAX_SAME_DIRECTION:-3}
+      - MAX_SAME_DIRECTION_PCT=${MAX_SAME_DIRECTION_PCT:-0.6}
+    volumes:
+      - bot-data:/app/data
+    depends_on:
+      - data-hub
+      - strategy-service
+    restart: unless-stopped
+
+volumes:
+  hub-data:
+  bot-data:
