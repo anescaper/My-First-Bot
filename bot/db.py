@@ -170,7 +170,7 @@ def get_orders_for_round(
 
 def update_order_status(conn: sqlite3.Connection, order_id: str, status: str,
                         filled_at: Optional[int] = None) -> None:
-    if filled_at:
+    if filled_at is not None:
         conn.execute(
             "UPDATE orders SET status=?, filled_at=? WHERE order_id=?",
             (status, filled_at, order_id)
@@ -202,6 +202,15 @@ def insert_position(conn: sqlite3.Connection, p: Position) -> int:
     return cur.lastrowid
 
 
+def get_positions_for_round(conn: sqlite3.Connection, round_ts: int, asset: str) -> list[Position]:
+    """Check if any position (open or closed) exists for a given round."""
+    rows = conn.execute(
+        "SELECT * FROM positions WHERE round_ts=? AND asset=?",
+        (round_ts, asset)
+    ).fetchall()
+    return [Position(**dict(r)) for r in rows]
+
+
 def get_open_positions(conn: sqlite3.Connection) -> list[Position]:
     rows = conn.execute(
         "SELECT * FROM positions WHERE status IN ('open', 'exiting')"
@@ -224,6 +233,16 @@ def update_position_sell(conn: sqlite3.Connection, pos_id: int,
         "UPDATE positions SET sell_order=?, sell_price=?, status='exiting' WHERE id=?",
         (sell_order, sell_price, pos_id)
     )
+
+
+def today_pnl(conn: sqlite3.Connection) -> float:
+    """Sum of closed position P&L since midnight UTC."""
+    import time
+    midnight = int(time.time()) - (int(time.time()) % 86400)
+    return conn.execute(
+        "SELECT COALESCE(SUM(pnl), 0) FROM positions WHERE status='closed' AND closed_at >= ?",
+        (midnight,)
+    ).fetchone()[0]
 
 
 def total_pnl(conn: sqlite3.Connection) -> float:

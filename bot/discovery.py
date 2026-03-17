@@ -11,7 +11,7 @@ import requests
 import sqlite3
 
 import config as C
-from types import Round
+from models import Round
 import db
 
 log = logging.getLogger("bot.discovery")
@@ -72,6 +72,8 @@ def discover_rounds(conn: sqlite3.Connection) -> int:
     # Generate all future round timestamps within lookahead
     max_rounds = C.LOOKAHEAD_HOURS * (3600 // C.ROUND_DURATION_S)
 
+    miss_streak = 0  # consecutive misses — stop early if API has no more
+
     for i in range(1, max_rounds + 1):
         ts = current_5m + i * C.ROUND_DURATION_S
 
@@ -79,8 +81,14 @@ def discover_rounds(conn: sqlite3.Connection) -> int:
         if ts - now < C.ROUND_DURATION_S:
             continue
 
+        # Check if ALL assets for this timestamp are already tracked
+        all_known = all(db.round_exists(conn, ts, a) for a in C.ASSETS)
+        if all_known:
+            miss_streak = 0
+            continue
+
+        round_found = False
         for asset in C.ASSETS:
-            # Skip if already tracked
             if db.round_exists(conn, ts, asset):
                 continue
 
@@ -88,7 +96,16 @@ def discover_rounds(conn: sqlite3.Connection) -> int:
             if rnd:
                 db.insert_round(conn, rnd)
                 new_count += 1
+                round_found = True
                 time.sleep(C.API_DELAY_S)
+
+        if round_found:
+            miss_streak = 0
+        else:
+            miss_streak += 1
+            # If 10 consecutive timestamps have no markets, stop scanning
+            if miss_streak >= 10:
+                break
 
     conn.commit()
 

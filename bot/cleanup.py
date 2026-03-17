@@ -37,17 +37,28 @@ def cleanup_old_rounds(client: ClobClient, conn: sqlite3.Connection) -> int:
         (cutoff,)
     ).fetchall()
 
+    # Get rounds with active positions — don't settle those
+    open_pos = db.get_open_positions(conn)
+    rounds_with_positions = {(p.round_ts, p.asset) for p in open_pos}
+
     cleaned = 0
     for row in rows:
         round_ts, asset = row[0], row[1]
+
+        # Don't settle rounds that still have active positions
+        if (round_ts, asset) in rounds_with_positions:
+            continue
 
         # Cancel any remaining open orders
         stale_orders = db.get_orders_for_round(
             conn, round_ts, asset, status="open"
         )
         for order in stale_orders:
-            cancel_order(client, order.order_id)
-            db.update_order_status(conn, order.order_id, "cancelled")
+            if cancel_order(client, order.order_id):
+                db.update_order_status(conn, order.order_id, "cancelled")
+            else:
+                # Mark cancelled anyway for stale rounds — order is likely expired
+                db.update_order_status(conn, order.order_id, "cancelled")
 
         db.update_round_status(conn, round_ts, asset, "settled")
         cleaned += 1

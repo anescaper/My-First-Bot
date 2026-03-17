@@ -10,9 +10,18 @@ from py_clob_client.client import ClobClient
 from py_clob_client.clob_types import ApiCreds, OrderArgs, OrderType
 from py_clob_client.order_builder.constants import BUY, SELL
 
+import os
 import config as C
 
 log = logging.getLogger("bot.client")
+
+REQUIRED_SECRETS = [
+    "polymarket_api_key",
+    "polymarket_api_secret",
+    "polymarket_passphrase",
+    "polymarket_private_key",
+    "polymarket_funder_address",
+]
 
 # Re-export constants for other modules
 BUY_SIDE = BUY
@@ -27,6 +36,15 @@ def read_secret(name: str) -> str:
 
 def create_client() -> ClobClient:
     """Initialize and return an authenticated ClobClient."""
+    # Validate all secrets exist before trying to use them
+    missing = [s for s in REQUIRED_SECRETS if not os.path.exists(f"{C.SECRETS_DIR}/{s}")]
+    if missing:
+        raise SystemExit(
+            f"Missing secret files in {C.SECRETS_DIR}/:\n"
+            + "\n".join(f"  - {s}" for s in missing)
+            + "\nCreate these files with your Polymarket API credentials."
+        )
+
     pk = read_secret("polymarket_private_key")
     if not pk.startswith("0x"):
         pk = "0x" + pk

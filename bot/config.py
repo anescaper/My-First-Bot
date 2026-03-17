@@ -30,6 +30,7 @@ EXIT_DEADLINE_S: int = 240           # market-sell at T+4min
 BUDGET_TOTAL: float = 350.0
 MAX_OPEN_ORDERS: int = 60
 MAX_POSITIONS: int = 5
+DAILY_DRAWDOWN_LIMIT: float = 35.0   # 10% of budget — pause trading
 
 # ── API ──────────────────────────────────────────────────────
 CLOB_HOST: str = "https://clob.polymarket.com"

@@ -37,34 +37,47 @@ def manage_exits(client: ClobClient, conn: sqlite3.Connection) -> int:
 
     positions = db.get_open_positions(conn)
     for pos in positions:
-        elapsed = now - pos.round_ts
+        elapsed = now - pos.opened_at
 
         # ── Check SELL fill ──────────────────────────────────
         if pos.sell_order and pos.status == "exiting":
             info = get_order_status(client, pos.sell_order)
             if info and info["size_matched"] > 0:
                 if info["status"] in ("MATCHED", "FILLED", "CLOSED"):
-                    pnl = (C.SELL_TARGET - pos.entry_price) * info["size_matched"]
+                    actual_price = pos.sell_price or C.SELL_TARGET
+                    pnl = (actual_price - pos.entry_price) * info["size_matched"]
                     db.close_position(
-                        conn, pos.id, pnl, C.SELL_TARGET, now
+                        conn, pos.id, pnl, actual_price, now
                     )
                     db.update_order_status(conn, pos.sell_order, "filled", now)
+                    db.log_pnl(conn, now, "profit_exit", pnl, db.total_pnl(conn) + pnl)
                     log.info(
-                        f"✅ PROFIT: {pos.asset} {pos.token_side} | "
-                        f"${pos.entry_price}→${C.SELL_TARGET} | "
+                        f"✅ EXIT: {pos.asset} {pos.token_side} | "
+                        f"${pos.entry_price}→${actual_price} | "
                         f"P&L: ${pnl:+.2f}"
                     )
                     closed += 1
                     conn.commit()
                     continue
 
-        # ── Emergency exit at T+4min ─────────────────────────
-        if elapsed >= C.EXIT_DEADLINE_S:
+        # ── Emergency exit at T+4min (only if not already exiting) ──
+        if elapsed >= C.EXIT_DEADLINE_S and pos.status != "exiting":
             log.warning(
                 f"⚠️ EMERGENCY EXIT: {pos.asset} {pos.token_side} "
                 f"T+{elapsed}s (deadline {C.EXIT_DEADLINE_S}s)"
             )
             _emergency_exit(client, conn, pos, now)
+            closed += 1
+            conn.commit()
+
+        # ── Force-close stale exiting positions at T+8min ────
+        elif elapsed >= C.EXIT_DEADLINE_S * 2 and pos.status == "exiting":
+            log.warning(
+                f"⚠️ FORCE CLOSE: {pos.asset} {pos.token_side} "
+                f"T+{elapsed}s — sell never filled"
+            )
+            pnl = -(pos.entry_price * pos.entry_size)
+            db.close_position(conn, pos.id, pnl, 0.0, now)
             closed += 1
             conn.commit()
 
@@ -112,8 +125,13 @@ def _emergency_exit(
             price=0.01, size=pos.entry_size,
             status="open", placed_at=now,
         ))
-        log.info(f"  Market sell placed at $0.01")
-
-    # Close position (estimate worst case P&L)
-    pnl = -(pos.entry_price * pos.entry_size)
-    db.close_position(conn, pos.id, pnl, 0.01, now)
+        # Keep position as 'exiting' — the sell fill check in manage_exits()
+        # will close it with the actual fill price
+        db.update_position_sell(conn, pos.id, sell_oid, 0.01)
+        conn.commit()  # Persist immediately — crash safety for CLOB orders
+        log.info(f"  Market sell placed at $0.01, awaiting fill")
+    else:
+        # No sell placed — close at total loss
+        pnl = -(pos.entry_price * pos.entry_size)
+        db.close_position(conn, pos.id, pnl, 0.0, now)
+        log.warning(f"  Failed to place emergency sell, closed at loss")

@@ -33,6 +33,11 @@ def place_preorders(client: ClobClient, conn: sqlite3.Connection) -> int:
         log.debug(f"Order limit reached ({open_count}/{C.MAX_OPEN_ORDERS})")
         return 0
 
+    open_positions = db.count_open_positions(conn)
+    if open_positions >= C.MAX_POSITIONS:
+        log.debug(f"Position limit reached ({open_positions}/{C.MAX_POSITIONS})")
+        return 0
+
     rounds = db.get_rounds_by_status(conn, "new")
     placed = 0
 
@@ -97,6 +102,20 @@ def check_fills(client: ClobClient, conn: sqlite3.Connection) -> list[Order]:
     now = int(time.time())
 
     for order in open_buys:
+        # Enforce position limit — if full, cancel remaining BUYs
+        if db.count_open_positions(conn) >= C.MAX_POSITIONS:
+            cancel_order(client, order.order_id)
+            db.update_order_status(conn, order.order_id, "cancelled")
+            continue
+
+        # Skip if we already have a position for this round (prevent double fill)
+        existing = db.get_positions_for_round(conn, order.round_ts, order.asset)
+        if existing:
+            # Cancel this stale BUY — the other side already filled
+            cancel_order(client, order.order_id)
+            db.update_order_status(conn, order.order_id, "cancelled")
+            continue
+
         info = get_order_status(client, order.order_id)
         if not info:
             continue
