@@ -5,11 +5,9 @@ No parameter should ever be hardcoded elsewhere.
 To extend: add new constants here, import in the module that needs them.
 
 Strategy: Symmetric Vol Harvest v5 (unified exit)
-  - BUY both UP and DOWN at $0.27 (12h early, GTC)
-  - When one side fills, place SELL at $0.48
-  - BTC: keep opposite BUY alive + hold to settlement if sell doesn't fill
-         (double insurance: sell profit OR settlement payout)
-  - ETH/SOL/XRP: cancel opposite BUY on fill, emergency exit if sell fails
+  - BUY both UP and DOWN at $0.27 (4h early, GTC)
+  - When one side fills, cancel opposite BUY, place SELL at $0.48
+  - All assets use the same exit logic (no lucky settlement)
 """
 
 # ── Assets ───────────────────────────────────────────────────
@@ -18,9 +16,8 @@ TIMEFRAME: str = "5m"
 ROUND_DURATION_S: int = 300
 
 # ── Exit Strategy ──────────────────────────────────────────
-# BTC: don't cancel opposite BUY on fill, hold to settlement if sell fails
-# "Lucky settlement" assets — double insurance strategy
-LUCKY_SETTLEMENT: set[str] = set()  # disabled
+# All assets: cancel opposite BUY on fill, emergency exit if sell fails
+LUCKY_SETTLEMENT: set[str] = set()
 
 # ── Order Pricing ────────────────────────────────────────────
 BUY_PRICE: float = 0.27       # buy on both UP and DOWN at this price

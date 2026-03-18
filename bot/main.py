@@ -46,13 +46,12 @@ def main():
     signal.signal(signal.SIGTERM, _handle_signal)
 
     log.info("=" * 50)
-    log.info("VOL HARVEST BOT v4 — LUCKY SETTLEMENT")
+    log.info("VOL HARVEST BOT v5 — UNIFIED EXIT")
     log.info(f"  Budget: ${C.BUDGET_TOTAL}")
     log.info(f"  Buy: ${C.BUY_PRICE} → Sell: ${C.SELL_TARGET}")
     log.info(f"  Size: {C.BUY_SIZE} shares/side (${C.BUY_PRICE * C.BUY_SIZE:.2f}/order)")
-    log.info(f"  Lucky assets: {C.LUCKY_SETTLEMENT} (keep opp BUY, hold to settlement)")
-    log.info(f"  Standard assets: {[a for a in C.ASSETS if a not in C.LUCKY_SETTLEMENT]}")
-    log.info(f"  Lookahead: {C.LOOKAHEAD_HOURS}h")
+    log.info(f"  Assets: {C.ASSETS}")
+    log.info(f"  Lookahead: {C.LOOKAHEAD_HOURS}h | Fill check: {C.FILL_CHECK_INTERVAL_S}s")
     log.info(f"  Max orders/positions: {C.MAX_OPEN_ORDERS}/{C.MAX_POSITIONS}")
     log.info("=" * 50)
 
