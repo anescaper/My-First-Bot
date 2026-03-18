@@ -1,22 +1,18 @@
 #!/usr/bin/env python3
 """
-Main — entry point and event loop.
-Orchestrates all modules. Each tick: discover → signal → fill → exit → cleanup.
+Main — entry point for the vol harvest bot.
 
-To extend: add new tick handlers in the main loop.
+3-phase startup:
+  Phase 1: init_future_orders()  — scan 24h ahead, store rounds in DB
+  Phase 2: configure_orders()    — place BUY orders with parameters
+  Phase 3: run_bot()             — main loop (safe cancel: bot orders only)
 """
-import time
-import signal
 import logging
 
 import config as C
 import db
 from client import create_client
-from discovery import discover_rounds
-from orders import place_preorders, check_fills, cancel_all
-from signals import process_signals
-from exits import manage_exits
-from cleanup import cleanup_old_rounds
+from startup import init_future_orders, configure_orders, run_bot
 
 # ── Logging ──────────────────────────────────────────────────
 logging.basicConfig(
@@ -29,119 +25,31 @@ logging.basicConfig(
 )
 log = logging.getLogger("bot")
 
-# ── Shutdown flag ────────────────────────────────────────────
-_shutdown = False
-
-
-def _handle_signal(signum, frame):
-    global _shutdown
-    _shutdown = True
-    log.warning(f"Received signal {signum}, shutting down...")
-
 
 def main():
-    global _shutdown
-
-    signal.signal(signal.SIGINT, _handle_signal)
-    signal.signal(signal.SIGTERM, _handle_signal)
-
     log.info("=" * 50)
-    log.info("VOL HARVEST BOT v4 — LUCKY SETTLEMENT")
-    log.info(f"  Budget: ${C.BUDGET_TOTAL}")
-    log.info(f"  Buy: ${C.BUY_PRICE} → Sell: ${C.SELL_TARGET}")
-    log.info(f"  Size: {C.BUY_SIZE} shares/side (${C.BUY_PRICE * C.BUY_SIZE:.2f}/order)")
-    log.info(f"  Lucky assets: {C.LUCKY_SETTLEMENT} (keep opp BUY, hold to settlement)")
-    log.info(f"  Standard assets: {[a for a in C.ASSETS if a not in C.LUCKY_SETTLEMENT]}")
-    log.info(f"  Lookahead: {C.LOOKAHEAD_HOURS}h")
-    log.info(f"  Max orders/positions: {C.MAX_OPEN_ORDERS}/{C.MAX_POSITIONS}")
+    log.info("VOL HARVEST BOT — 3-PHASE STARTUP")
     log.info("=" * 50)
 
     client = create_client()
     conn = db.init_db()
 
-    # Cancel all existing orders on Polymarket to prevent duplicates from previous runs
-    try:
-        result = client.cancel_all()
-        cancelled = result.get("canceled", [])
-        log.info(f"Startup: cancelled {len(cancelled)} stale orders on Polymarket")
-    except Exception as e:
-        log.warning(f"Startup cancel_all failed: {e}")
+    # ── Phase 1: Discover markets 24h ahead ──────────────────
+    init_future_orders(conn, lookahead_hours=24)
 
-    last_discovery = 0
-    last_cleanup = 0
-    last_fill_check = 0
-    last_exit_check = 0
-    last_stats = 0
-    tick = 0
-
-    while not _shutdown:
-        try:
-            now = time.time()
-            tick += 1
-
-            # ── Drawdown circuit breaker ───────────────────
-            daily_loss = db.today_pnl(conn)
-            if daily_loss <= -C.DAILY_DRAWDOWN_LIMIT:
-                if tick % 100 == 1:  # Log once every ~100s
-                    log.warning(
-                        f"🛑 DRAWDOWN LIMIT: ${daily_loss:+.2f} today "
-                        f"(limit -${C.DAILY_DRAWDOWN_LIMIT}). No new orders."
-                    )
-            else:
-                # ── Discovery: every DISCOVERY_INTERVAL ──────────
-                if now - last_discovery > C.DISCOVERY_INTERVAL_S:
-                    discover_rounds(conn)
-                    place_preorders(client, conn)
-                    last_discovery = now
-
-            # ── Signals: every tick (log only, no cancellation) ──
-            process_signals(conn)
-
-            # ── Fill check: every 3s ─────────────────────────
-            if now - last_fill_check > C.FILL_CHECK_INTERVAL_S:
-                check_fills(client, conn)
-                last_fill_check = now
-
-            # ── Exit management: every 5s ────────────────────
-            if now - last_exit_check > 5:
-                manage_exits(client, conn)
-                last_exit_check = now
-
-            # ── Cleanup: every 5 min ─────────────────────────
-            if now - last_cleanup > 300:
-                cleanup_old_rounds(client, conn)
-                last_cleanup = now
-
-            # ── Stats: every 100s ────────────────────────────
-            if now - last_stats > 100:
-                _log_stats(conn)
-                last_stats = now
-
-            time.sleep(1)
-
-        except KeyboardInterrupt:
-            _shutdown = True
-        except Exception as e:
-            log.error(f"Main loop error: {e}", exc_info=True)
-            time.sleep(5)
-
-    # ── Graceful shutdown ────────────────────────────────────
-    log.info("Shutting down gracefully...")
-    cancel_all(client, conn)
-    _log_stats(conn)
-    conn.close()
-    log.info("Bot stopped.")
-
-
-def _log_stats(conn):
-    """Log current bot statistics."""
-    open_orders = db.count_open_orders(conn)
-    open_pos = db.count_open_positions(conn)
-    pnl = db.total_pnl(conn)
-    log.info(
-        f"📊 Orders: {open_orders} | Positions: {open_pos} | "
-        f"P&L: ${pnl:+.2f}"
+    # ── Phase 2: Configure and place orders ──────────────────
+    configure_orders(
+        client, conn,
+        assets=C.ASSETS,            # ["btc", "eth", "sol", "xrp"]
+        side="BOTH",                # UP, DOWN, or BOTH
+        buy_price=C.BUY_PRICE,      # 0.27
+        buy_amount=C.BUY_PRICE * C.BUY_SIZE,  # $5.13
+        sell_price=C.SELL_TARGET,    # 0.48
+        span_hours=4.0,             # 4 hours ahead
     )
+
+    # ── Phase 3: Run the bot loop ────────────────────────────
+    run_bot(client, conn)
 
 
 if __name__ == "__main__":
