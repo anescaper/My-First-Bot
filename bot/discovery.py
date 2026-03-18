@@ -54,27 +54,45 @@ def fetch_market(asset: str, round_ts: int) -> Round | None:
         return None
 
 
-def discover_rounds(conn: sqlite3.Connection) -> int:
+# Track discovery progress across calls to avoid blocking
+_discovery_offset = 0
+
+
+def discover_rounds(conn: sqlite3.Connection, max_api_calls: int = 20) -> int:
     """
-    Discover all upcoming rounds for the next LOOKAHEAD_HOURS.
-    Inserts new rounds into DB.
+    Discover upcoming rounds for the next LOOKAHEAD_HOURS.
+    Processes in chunks to avoid blocking the main loop.
 
     Args:
         conn: SQLite connection
+        max_api_calls: max API calls per invocation (prevents >7s blocking)
 
     Returns:
         Number of new rounds discovered
     """
+    global _discovery_offset
+
     now = int(time.time())
     current_5m = (now // C.ROUND_DURATION_S) * C.ROUND_DURATION_S
     new_count = 0
+    api_calls = 0
 
     # Generate all future round timestamps within lookahead
     max_rounds = C.LOOKAHEAD_HOURS * (3600 // C.ROUND_DURATION_S)
 
-    miss_streak = 0  # consecutive misses — stop early if API has no more
+    miss_streak = 0
 
-    for i in range(1, max_rounds + 1):
+    # Resume from where we left off last call
+    start = _discovery_offset + 1
+    if start > max_rounds:
+        start = 1
+        _discovery_offset = 0
+
+    for i in range(start, max_rounds + 1):
+        if api_calls >= max_api_calls:
+            _discovery_offset = i  # resume here next call
+            break
+
         ts = current_5m + i * C.ROUND_DURATION_S
 
         # Skip rounds starting in < 5 min (too late to pre-order)
@@ -93,23 +111,29 @@ def discover_rounds(conn: sqlite3.Connection) -> int:
                 continue
 
             rnd = fetch_market(asset, ts)
+            api_calls += 1
             if rnd:
                 db.insert_round(conn, rnd)
                 new_count += 1
                 round_found = True
                 time.sleep(C.API_DELAY_S)
 
+            if api_calls >= max_api_calls:
+                break
+
         if round_found:
             miss_streak = 0
         else:
             miss_streak += 1
-            # If 10 consecutive timestamps have no markets, stop scanning
             if miss_streak >= 10:
+                _discovery_offset = 0  # reset for next full scan
                 break
+    else:
+        _discovery_offset = 0  # completed full scan, reset
 
     conn.commit()
 
     if new_count > 0:
-        log.info(f"Discovered {new_count} new rounds")
+        log.info(f"Discovered {new_count} new rounds ({api_calls} API calls)")
 
     return new_count

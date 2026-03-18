@@ -17,9 +17,20 @@ from client import place_order, cancel_order, get_order_status, BUY_SIDE, SELL_S
 log = logging.getLogger("bot.orders")
 
 
+def _committed_capital(conn: sqlite3.Connection) -> float:
+    """
+    Total capital locked: open BUY orders + open positions' entry cost.
+    This is what's actually committed on the CLOB.
+    """
+    open_order_cost = db.sum_open_order_cost(conn)
+    open_position_cost = db.sum_open_position_cost(conn)
+    return open_order_cost + open_position_cost
+
+
 def place_preorders(client: ClobClient, conn: sqlite3.Connection) -> int:
     """
     Place BUY orders on both UP and DOWN for all 'new' rounds.
+    Enforces budget by tracking committed capital (orders + positions).
 
     Args:
         client: ClobClient instance
@@ -38,35 +49,46 @@ def place_preorders(client: ClobClient, conn: sqlite3.Connection) -> int:
         log.debug(f"Position limit reached ({open_positions}/{C.MAX_POSITIONS})")
         return 0
 
+    # Budget check: committed capital must not exceed budget
+    committed = _committed_capital(conn)
+    pair_cost = C.BUY_PRICE * C.BUY_SIZE * 2  # UP + DOWN
+    if committed + pair_cost > C.BUDGET_TOTAL:
+        log.debug(f"Budget limit: ${committed:.2f} committed, ${C.BUDGET_TOTAL} max")
+        return 0
+
     rounds = db.get_rounds_by_status(conn, "new")
     placed = 0
 
     for rnd in rounds:
-        if open_count + placed >= C.MAX_OPEN_ORDERS:
+        # Check both order limit AND budget before each pair
+        if open_count + placed >= C.MAX_OPEN_ORDERS - 1:  # -1: room for both UP+DOWN
+            break
+        committed = _committed_capital(conn) + placed * C.BUY_PRICE * C.BUY_SIZE
+        if committed + pair_cost > C.BUDGET_TOTAL:
             break
 
         # Place BUY UP
         up_oid = place_order(
-            client, rnd.up_token, BUY_SIDE, C.BUY_PRICE, C.SIZE_UP
+            client, rnd.up_token, BUY_SIDE, C.BUY_PRICE, C.BUY_SIZE
         )
         if up_oid:
             db.insert_order(conn, Order(
                 order_id=up_oid, round_ts=rnd.round_ts, asset=rnd.asset,
                 token_side="UP", order_type="BUY",
-                price=C.BUY_PRICE, size=C.SIZE_UP,
+                price=C.BUY_PRICE, size=C.BUY_SIZE,
                 status="open", placed_at=int(time.time()),
             ))
             placed += 1
 
         # Place BUY DOWN
         down_oid = place_order(
-            client, rnd.down_token, BUY_SIDE, C.BUY_PRICE, C.SIZE_DOWN
+            client, rnd.down_token, BUY_SIDE, C.BUY_PRICE, C.BUY_SIZE
         )
         if down_oid:
             db.insert_order(conn, Order(
                 order_id=down_oid, round_ts=rnd.round_ts, asset=rnd.asset,
                 token_side="DOWN", order_type="BUY",
-                price=C.BUY_PRICE, size=C.SIZE_DOWN,
+                price=C.BUY_PRICE, size=C.BUY_SIZE,
                 status="open", placed_at=int(time.time()),
             ))
             placed += 1
@@ -77,7 +99,7 @@ def place_preorders(client: ClobClient, conn: sqlite3.Connection) -> int:
         conn.commit()
 
     if placed > 0:
-        log.info(f"Placed {placed} pre-orders")
+        log.info(f"Placed {placed} pre-orders (${_committed_capital(conn):.2f} committed)")
 
     return placed
 

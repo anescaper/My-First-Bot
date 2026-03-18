@@ -188,6 +188,20 @@ def count_open_orders(conn: sqlite3.Connection) -> int:
     ).fetchone()[0]
 
 
+def sum_open_order_cost(conn: sqlite3.Connection) -> float:
+    """Total capital locked in open BUY orders (price × size)."""
+    return conn.execute(
+        "SELECT COALESCE(SUM(price * size), 0) FROM orders WHERE status='open' AND order_type='BUY'"
+    ).fetchone()[0]
+
+
+def sum_open_position_cost(conn: sqlite3.Connection) -> float:
+    """Total capital locked in open positions (entry_price × entry_size)."""
+    return conn.execute(
+        "SELECT COALESCE(SUM(entry_price * entry_size), 0) FROM positions WHERE status IN ('open', 'exiting')"
+    ).fetchone()[0]
+
+
 # ── Positions ────────────────────────────────────────────────
 
 def insert_position(conn: sqlite3.Connection, p: Position) -> int:

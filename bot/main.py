@@ -46,11 +46,14 @@ def main():
     signal.signal(signal.SIGTERM, _handle_signal)
 
     log.info("=" * 50)
-    log.info("VOL HARVEST BOT STARTING")
+    log.info("VOL HARVEST BOT v3 — SYMMETRIC")
     log.info(f"  Budget: ${C.BUDGET_TOTAL}")
     log.info(f"  Buy: ${C.BUY_PRICE} → Sell: ${C.SELL_TARGET}")
+    log.info(f"  Size: {C.BUY_SIZE} shares/side (${C.BUY_PRICE * C.BUY_SIZE:.2f}/order)")
+    log.info(f"  Profit target: ${C.SELL_TARGET - C.BUY_PRICE:.2f}/share")
     log.info(f"  Assets: {C.ASSETS}")
     log.info(f"  Lookahead: {C.LOOKAHEAD_HOURS}h")
+    log.info(f"  Max orders/positions: {C.MAX_OPEN_ORDERS}/{C.MAX_POSITIONS}")
     log.info("=" * 50)
 
     client = create_client()
@@ -83,8 +86,8 @@ def main():
                     place_preorders(client, conn)
                     last_discovery = now
 
-            # ── Signals: every tick (critical window only) ───
-            process_signals(client, conn)
+            # ── Signals: every tick (log only, no cancellation) ──
+            process_signals(conn)
 
             # ── Fill check: every 3s ─────────────────────────
             if now - last_fill_check > C.FILL_CHECK_INTERVAL_S:

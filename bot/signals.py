@@ -1,19 +1,23 @@
 """
-Signals — directional signal detection.
-Reads competitor_tracker.db for mass cancellation events.
+Signals — directional signal detection from competitor tracking.
 
-To extend: add new signal sources (e.g., Brownian Bridge)
-by adding a new function and calling it from process_signals().
+In SYMMETRIC VOL HARVEST mode, signals do NOT cancel pre-fill BUY orders.
+Both UP and DOWN buys stay active — we need whichever side fills.
+
+Signals are used for:
+  1. Logging — track competitor behavior for analysis
+  2. Exit management — if we have a position and signal says it won't rebound,
+     trigger early exit (handled in exits.py)
+
+To extend: add new signal sources (e.g., Brownian Bridge).
 """
 import time
 import logging
 import sqlite3
-from py_clob_client.client import ClobClient
 
 import config as C
 import db
 from models import Signal
-from client import cancel_order
 
 log = logging.getLogger("bot.signals")
 
@@ -63,55 +67,51 @@ def read_competitor_signal(asset: str, round_ts: int) -> Signal | None:
         return None
 
 
-def process_signals(client: ClobClient, conn: sqlite3.Connection) -> int:
+def get_signal_for_position(asset: str, round_ts: int) -> Signal | None:
     """
-    For rounds in the signal window (T-120s to T-30s),
-    check for directional signals and cancel the wrong side.
+    Get signal relevant to an open position.
+    Used by exits.py to decide if early exit is warranted.
+
+    Returns:
+        Signal if strong directional evidence exists, None otherwise
+    """
+    return read_competitor_signal(asset, round_ts)
+
+
+def process_signals(conn: sqlite3.Connection) -> int:
+    """
+    Log competitor signals for monitoring. Does NOT cancel BUY orders.
+
+    In symmetric vol harvest, both sides stay active until one fills.
+    Signals are informational only at the pre-fill stage.
 
     Args:
         client: ClobClient instance
         conn: SQLite connection
 
     Returns:
-        Number of signals acted on
+        Number of signals detected (logged only, no action taken)
     """
     now = int(time.time())
-    acted = 0
+    detected = 0
 
-    # Check rounds that are 'placed' (have open orders)
+    # Check rounds in the critical window
     rounds = db.get_rounds_by_status(conn, "placed")
 
     for rnd in rounds:
         secs_to_round = rnd.round_ts - now
 
-        # Only act in the signal window
-        if not (C.SIGNAL_WINDOW_END_S <= secs_to_round <= C.SIGNAL_WINDOW_START_S):
+        # Only check near round start
+        if not (30 <= secs_to_round <= 120):
             continue
 
-        # Get competitor signal
         signal = read_competitor_signal(rnd.asset, rnd.round_ts)
-        if not signal:
-            continue
+        if signal:
+            log.info(
+                f"📡 SIGNAL {signal.direction} ({signal.source}, "
+                f"{signal.confidence:.0%}) for {rnd.asset} T{secs_to_round:+d}s "
+                f"[info only — no cancellation in vol harvest mode]"
+            )
+            detected += 1
 
-        # Cancel the WRONG side (opposite of signal direction)
-        cancel_side = "DOWN" if signal.direction == "UP" else "UP"
-
-        orders_to_cancel = db.get_orders_for_round(
-            conn, rnd.round_ts, rnd.asset,
-            token_side=cancel_side, order_type="BUY", status="open"
-        )
-
-        for order in orders_to_cancel:
-            if cancel_order(client, order.order_id):
-                db.update_order_status(conn, order.order_id, "cancelled")
-                log.info(
-                    f"🎯 SIGNAL {signal.direction} ({signal.source}, "
-                    f"{signal.confidence:.0%}) → cancelled {cancel_side} "
-                    f"for {rnd.asset} T{secs_to_round:+d}s"
-                )
-
-        db.update_round_status(conn, rnd.round_ts, rnd.asset, "signaled")
-        conn.commit()
-        acted += 1
-
-    return acted
+    return detected
