@@ -148,6 +148,24 @@ def get_open_orders(conn: sqlite3.Connection, order_type: Optional[str] = None) 
     return [Order(**dict(r)) for r in rows]
 
 
+def get_active_round_orders(conn: sqlite3.Connection, current_round_ts: int,
+                            order_type: Optional[str] = None) -> list[Order]:
+    """Get open orders only for the currently active round (by round_ts).
+    Much faster than polling all open orders — only checks orders that can
+    actually fill right now."""
+    if order_type:
+        rows = conn.execute(
+            "SELECT * FROM orders WHERE status='open' AND order_type=? AND round_ts=?",
+            (order_type, current_round_ts)
+        ).fetchall()
+    else:
+        rows = conn.execute(
+            "SELECT * FROM orders WHERE status='open' AND round_ts=?",
+            (current_round_ts,)
+        ).fetchall()
+    return [Order(**dict(r)) for r in rows]
+
+
 def get_orders_for_round(
     conn: sqlite3.Connection, round_ts: int, asset: str,
     token_side: Optional[str] = None, order_type: Optional[str] = None,

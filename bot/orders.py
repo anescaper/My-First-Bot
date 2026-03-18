@@ -106,8 +106,9 @@ def place_preorders(client: ClobClient, conn: sqlite3.Connection) -> int:
 
 def check_fills(client: ClobClient, conn: sqlite3.Connection) -> list[Order]:
     """
-    Check all open BUY orders for fills.
-    When filled: cancel opposite side, create position, place SELL.
+    Check open BUY orders for fills — only for the currently active round.
+    This avoids polling hundreds of future orders that can't fill yet,
+    reducing API calls from ~384 to ~8 per cycle (4 assets × 2 sides).
 
     Args:
         client: ClobClient instance
@@ -116,12 +117,13 @@ def check_fills(client: ClobClient, conn: sqlite3.Connection) -> list[Order]:
     Returns:
         List of filled Order objects
     """
-    open_buys = db.get_open_orders(conn, order_type="BUY")
+    now = int(time.time())
+    current_round_ts = (now // C.ROUND_DURATION_S) * C.ROUND_DURATION_S
+    open_buys = db.get_active_round_orders(conn, current_round_ts, order_type="BUY")
     if not open_buys:
         return []
 
     filled = []
-    now = int(time.time())
 
     for order in open_buys:
         # Enforce position limit — if full, cancel remaining BUYs
