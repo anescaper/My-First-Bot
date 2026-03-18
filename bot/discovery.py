@@ -5,6 +5,7 @@ Stores new rounds in the database.
 To extend: add new assets to config.ASSETS, add new timeframes to config.
 """
 import json
+from datetime import datetime, timezone
 import time
 import logging
 import requests
@@ -98,6 +99,12 @@ def discover_rounds(conn: sqlite3.Connection, max_api_calls: int = 20) -> int:
         # Skip rounds starting in < 5 min (too late to pre-order)
         if ts - now < C.ROUND_DURATION_S:
             continue
+        # Skip xx:55 rounds -- Brownian Bridge signal is strongest in the
+        # last 5 min of each hour, market is extremely one-sided
+        round_minute = datetime.fromtimestamp(ts, tz=timezone.utc).minute
+        if round_minute == 55:
+            continue
+
 
         # Check if ALL assets for this timestamp are already tracked
         all_known = all(db.round_exists(conn, ts, a) for a in C.ASSETS)
