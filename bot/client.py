@@ -7,7 +7,7 @@ To extend: add new API methods here, keep rate limiting centralized.
 import time
 import logging
 from py_clob_client.client import ClobClient
-from py_clob_client.clob_types import ApiCreds, OrderArgs, OrderType
+from py_clob_client.clob_types import ApiCreds, OrderArgs, OrderType, BalanceAllowanceParams, AssetType
 from py_clob_client.order_builder.constants import BUY, SELL
 
 import os
@@ -62,13 +62,35 @@ def create_client() -> ClobClient:
         signature_type=2,
         funder=read_secret("polymarket_funder_address"),
     )
-    log.info("ClobClient initialized")
+    # Approve token transfers for the exchange (needed for SELL orders)
+    try:
+        params = BalanceAllowanceParams(asset_type=AssetType.COLLATERAL, signature_type=2)
+        client.update_balance_allowance(params)
+        log.info("ClobClient initialized (allowances set)")
+    except Exception as e:
+        log.warning(f"update_balance_allowance failed: {e}")
+        log.info("ClobClient initialized")
     return client
 
 
 def _delay():
     """Rate limit: pause between API calls."""
     time.sleep(C.API_DELAY_S)
+
+
+def _refresh_allowance(client: ClobClient) -> bool:
+    """Refresh COLLATERAL allowance before SELL orders. Returns True on success."""
+    for attempt in range(3):
+        try:
+            params = BalanceAllowanceParams(asset_type=AssetType.COLLATERAL, signature_type=2)
+            client.update_balance_allowance(params)
+            time.sleep(0.5)  # give chain time to confirm allowance
+            return True
+        except Exception as e:
+            log.warning(f"Allowance refresh attempt {attempt+1}/3 failed: {e}")
+            time.sleep(1.0)
+    log.error("Allowance refresh failed after 3 attempts")
+    return False
 
 
 def place_order(client: ClobClient, token_id: str, side: str,
@@ -86,22 +108,39 @@ def place_order(client: ClobClient, token_id: str, side: str,
     Returns:
         order_id string, or None if placement failed
     """
-    try:
-        args = OrderArgs(price=price, size=size, side=side, token_id=token_id)
-        signed = client.create_order(args)
-        result = client.post_order(signed, OrderType.GTC)
-        _delay()
+    max_attempts = 3 if side == SELL else 1
+    for attempt in range(max_attempts):
+        try:
+            if side == SELL:
+                if not _refresh_allowance(client):
+                    continue  # retry after failed allowance
 
-        oid = result.get("orderID") or result.get("id")
-        if oid and result.get("success"):
-            return oid
-        else:
-            log.warning(f"Order rejected: {result}")
+            args = OrderArgs(price=price, size=size, side=side, token_id=token_id)
+            signed = client.create_order(args)
+            result = client.post_order(signed, OrderType.GTC)
+            _delay()
+
+            oid = result.get("orderID") or result.get("id")
+            if oid and result.get("success"):
+                return oid
+            else:
+                err_msg = str(result)
+                if "allowance" in err_msg.lower() and attempt < max_attempts - 1:
+                    log.warning(f"SELL allowance error (attempt {attempt+1}/{max_attempts}), retrying...")
+                    time.sleep(1.0)
+                    continue
+                log.warning(f"Order rejected: {result}")
+                return None
+        except Exception as e:
+            err_str = str(e)
+            if "allowance" in err_str.lower() and attempt < max_attempts - 1:
+                log.warning(f"SELL allowance error (attempt {attempt+1}/{max_attempts}), retrying...")
+                time.sleep(1.0)
+                continue
+            log.error(f"place_order failed: {e}")
+            _delay()
             return None
-    except Exception as e:
-        log.error(f"place_order failed: {e}")
-        _delay()
-        return None
+    return None
 
 
 def cancel_order(client: ClobClient, order_id: str) -> bool:
@@ -142,6 +181,26 @@ def get_order_status(client: ClobClient, order_id: str) -> dict | None:
     except Exception as e:
         log.debug(f"get_order_status {order_id[:16]}...: {e}")
         return None
+
+
+def get_best_bid(client: ClobClient, token_id: str) -> float:
+    """
+    Get the best (highest) bid price for a token from the order book.
+
+    Returns:
+        Best bid price as float, or 0.0 if no bids / error
+    """
+    try:
+        book = client.get_order_book(token_id)
+        _delay()
+        bids = book.get("bids", [])
+        if bids:
+            return max(float(b["price"]) for b in bids)
+        return 0.0
+    except Exception as e:
+        log.debug(f"get_best_bid: {e}")
+        _delay()
+        return 0.0
 
 
 def get_all_orders(client: ClobClient) -> list[dict]:

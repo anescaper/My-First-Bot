@@ -131,9 +131,9 @@ def check_fills(client: ClobClient, conn: sqlite3.Connection) -> list[Order]:
             continue
 
         # Skip if we already have a position for this round (prevent double fill)
+        # But for lucky settlement assets, keep the opposite BUY alive
         existing = db.get_positions_for_round(conn, order.round_ts, order.asset)
-        if existing:
-            # Cancel this stale BUY — the other side already filled
+        if existing and order.asset not in C.LUCKY_SETTLEMENT:
             cancel_order(client, order.order_id)
             db.update_order_status(conn, order.order_id, "cancelled")
             continue
@@ -152,29 +152,33 @@ def check_fills(client: ClobClient, conn: sqlite3.Connection) -> list[Order]:
 
             db.update_order_status(conn, order.order_id, "filled", filled_at=now)
 
-            # Cancel opposite side BUY
-            opp_side = "DOWN" if order.token_side == "UP" else "UP"
-            opp_orders = db.get_orders_for_round(
-                conn, order.round_ts, order.asset,
-                token_side=opp_side, order_type="BUY", status="open"
-            )
-            for opp in opp_orders:
-                if cancel_order(client, opp.order_id):
-                    db.update_order_status(conn, opp.order_id, "cancelled")
-                    log.info(f"  Cancelled opposite {opp_side} BUY")
+            is_lucky = order.asset in C.LUCKY_SETTLEMENT
 
-            # Get token_id for SELL
+            # Cancel opposite side BUY — but NOT for lucky settlement assets
+            if is_lucky:
+                log.info(f"  🍀 LUCKY MODE: keeping opposite BUY alive for {order.asset}")
+            else:
+                # UP+DOWN=$1.00, so if DOWN=$0.27 then UP=$0.73 — opposite can't fill
+                opp_side = "DOWN" if order.token_side == "UP" else "UP"
+                opp_orders = db.get_orders_for_round(
+                    conn, order.round_ts, order.asset,
+                    token_side=opp_side, order_type="BUY", status="open"
+                )
+                for opp in opp_orders:
+                    if cancel_order(client, opp.order_id):
+                        db.update_order_status(conn, opp.order_id, "cancelled")
+                        log.info(f"  Cancelled opposite {opp_side} BUY")
+
+            # Place SELL at target (all assets try to sell at $0.48)
             rnd = db.get_round(conn, order.round_ts, order.asset)
             if not rnd:
                 continue
             token_id = rnd.up_token if order.token_side == "UP" else rnd.down_token
 
-            # Place SELL at target
             sell_oid = place_order(
                 client, token_id, SELL_SIDE, C.SELL_TARGET, matched
             )
 
-            # Create position
             pos = Position(
                 id=0, round_ts=order.round_ts, asset=order.asset,
                 token_side=order.token_side,
@@ -184,7 +188,7 @@ def check_fills(client: ClobClient, conn: sqlite3.Connection) -> list[Order]:
                 status="exiting" if sell_oid else "open",
                 opened_at=now,
             )
-            pos_id = db.insert_position(conn, pos)
+            db.insert_position(conn, pos)
 
             if sell_oid:
                 db.insert_order(conn, Order(

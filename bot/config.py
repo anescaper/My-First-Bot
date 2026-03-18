@@ -4,25 +4,33 @@ No parameter should ever be hardcoded elsewhere.
 
 To extend: add new constants here, import in the module that needs them.
 
-Strategy: Symmetric Vol Harvest
-  - BUY both UP and DOWN at $0.26 (12h early, GTC)
-  - When one side fills (market moves), place SELL at $0.48
-  - Profit: $0.22/share on reversion toward center
-  - Cancel opposite BUY on fill (only one side fills per round)
+Strategy: Symmetric Vol Harvest v5 (unified exit)
+  - BUY both UP and DOWN at $0.27 (12h early, GTC)
+  - When one side fills, place SELL at $0.48
+  - BTC: keep opposite BUY alive + hold to settlement if sell doesn't fill
+         (double insurance: sell profit OR settlement payout)
+  - ETH/SOL/XRP: cancel opposite BUY on fill, emergency exit if sell fails
 """
 
 # ── Assets ───────────────────────────────────────────────────
-ASSETS: list[str] = ["btc", "eth"]
+ASSETS: list[str] = ["btc", "eth", "sol", "xrp"]
 TIMEFRAME: str = "5m"
 ROUND_DURATION_S: int = 300
 
+# ── Exit Strategy ──────────────────────────────────────────
+# BTC: don't cancel opposite BUY on fill, hold to settlement if sell fails
+# "Lucky settlement" assets — double insurance strategy
+LUCKY_SETTLEMENT: set[str] = set()  # disabled
+
 # ── Order Pricing ────────────────────────────────────────────
-BUY_PRICE: float = 0.26       # buy on both UP and DOWN at this price
-SELL_TARGET: float = 0.48     # sell below center — partial reversion, not full reversal
+BUY_PRICE: float = 0.27       # buy on both UP and DOWN at this price
+SELL_TARGET: float = 0.48     # sell on rebound
+MIN_SELL_PRICE: float = 0.30  # minimum price to accept on step-down sell (must be > BUY_PRICE)
+SELL_STEPDOWN_S: int = 120    # step-down when < 120s (2min) left in round
 
 # ── Order Sizing (shares) ───────────────────────────────────
 # Symmetric: same size on both sides
-# 19 × $0.26 = $4.94 per order, $9.88 per round-asset pair
+# 19 × $0.27 = $5.13 per order, $10.26 per round-asset pair
 # Start small for data collection, scale up once win rate is known
 BUY_SIZE: int = 19
 EMERGENCY_SELL_PRICE: float = 0.01
@@ -31,17 +39,15 @@ EMERGENCY_SELL_PRICE: float = 0.01
 LOOKAHEAD_HOURS: int = 12
 DISCOVERY_INTERVAL_S: int = 300       # discover new rounds every 5 min
 FILL_CHECK_INTERVAL_S: int = 3       # check fills every 3s
-EXIT_DEADLINE_S: int = 240           # market-sell at T+4min
+EXIT_DEADLINE_S: int = 90            # emergency exit when < 90s (1.5min) left in round
 
 # ── Budget ───────────────────────────────────────────────────
-# $350 / $20.80 per pair = 16 round-asset pairs max
-# 16 pairs = 32 orders (UP + DOWN each)
-# 4 assets → 4 rounds ahead = 20 min coverage
-# 2 assets → 8 rounds ahead = 40 min coverage
-BUDGET_TOTAL: float = 350.0
-MAX_OPEN_ORDERS: int = 32
-MAX_POSITIONS: int = 8
-DAILY_DRAWDOWN_LIMIT: float = 35.0   # 10% of budget — pause trading
+# 4 assets × 2 orders × 19 × $0.27 = $41.04 per round set
+# $350 / $41.04 = ~8 round sets ahead = 40 min coverage
+BUDGET_TOTAL: float = 99999.0  # no artificial cap
+MAX_OPEN_ORDERS: int = 2000
+MAX_POSITIONS: int = 64
+DAILY_DRAWDOWN_LIMIT: float = 9999.0  # disabled — pause trading
 
 # ── API ──────────────────────────────────────────────────────
 CLOB_HOST: str = "https://clob.polymarket.com"

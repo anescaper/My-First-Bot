@@ -46,18 +46,26 @@ def main():
     signal.signal(signal.SIGTERM, _handle_signal)
 
     log.info("=" * 50)
-    log.info("VOL HARVEST BOT v3 — SYMMETRIC")
+    log.info("VOL HARVEST BOT v4 — LUCKY SETTLEMENT")
     log.info(f"  Budget: ${C.BUDGET_TOTAL}")
     log.info(f"  Buy: ${C.BUY_PRICE} → Sell: ${C.SELL_TARGET}")
     log.info(f"  Size: {C.BUY_SIZE} shares/side (${C.BUY_PRICE * C.BUY_SIZE:.2f}/order)")
-    log.info(f"  Profit target: ${C.SELL_TARGET - C.BUY_PRICE:.2f}/share")
-    log.info(f"  Assets: {C.ASSETS}")
+    log.info(f"  Lucky assets: {C.LUCKY_SETTLEMENT} (keep opp BUY, hold to settlement)")
+    log.info(f"  Standard assets: {[a for a in C.ASSETS if a not in C.LUCKY_SETTLEMENT]}")
     log.info(f"  Lookahead: {C.LOOKAHEAD_HOURS}h")
     log.info(f"  Max orders/positions: {C.MAX_OPEN_ORDERS}/{C.MAX_POSITIONS}")
     log.info("=" * 50)
 
     client = create_client()
     conn = db.init_db()
+
+    # Cancel all existing orders on Polymarket to prevent duplicates from previous runs
+    try:
+        result = client.cancel_all()
+        cancelled = result.get("canceled", [])
+        log.info(f"Startup: cancelled {len(cancelled)} stale orders on Polymarket")
+    except Exception as e:
+        log.warning(f"Startup cancel_all failed: {e}")
 
     last_discovery = 0
     last_cleanup = 0

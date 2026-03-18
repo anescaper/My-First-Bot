@@ -198,7 +198,7 @@ def sum_open_order_cost(conn: sqlite3.Connection) -> float:
 def sum_open_position_cost(conn: sqlite3.Connection) -> float:
     """Total capital locked in open positions (entry_price × entry_size)."""
     return conn.execute(
-        "SELECT COALESCE(SUM(entry_price * entry_size), 0) FROM positions WHERE status IN ('open', 'exiting')"
+        "SELECT COALESCE(SUM(entry_price * entry_size), 0) FROM positions WHERE status IN ('open', 'exiting', 'holding')"
     ).fetchone()[0]
 
 
@@ -227,7 +227,7 @@ def get_positions_for_round(conn: sqlite3.Connection, round_ts: int, asset: str)
 
 def get_open_positions(conn: sqlite3.Connection) -> list[Position]:
     rows = conn.execute(
-        "SELECT * FROM positions WHERE status IN ('open', 'exiting')"
+        "SELECT * FROM positions WHERE status IN ('open', 'exiting', 'holding')"
     ).fetchall()
     return [Position(**dict(r)) for r in rows]
 
@@ -267,7 +267,7 @@ def total_pnl(conn: sqlite3.Connection) -> float:
 
 def count_open_positions(conn: sqlite3.Connection) -> int:
     return conn.execute(
-        "SELECT COUNT(*) FROM positions WHERE status IN ('open', 'exiting')"
+        "SELECT COUNT(*) FROM positions WHERE status IN ('open', 'exiting', 'holding')"
     ).fetchone()[0]
 
 

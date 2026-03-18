@@ -1,11 +1,18 @@
 """
-Exits — manage open positions, detect SELL fills, emergency exit.
-Ensures we NEVER hold to settlement.
+Exits — manage open positions, detect SELL fills, settlement, emergency exit.
 
-Exit logic:
-  1. Check if SELL filled → close with profit
-  2. Signal-aware: if strong signal says position won't rebound → early exit
-  3. Past EXIT_DEADLINE → emergency market-sell at $0.01
+Exit logic (split by asset):
+  BTC (lucky settlement):
+    - Try SELL at $0.48 like normal
+    - If sell fills → profit exit (same as others)
+    - If sell doesn't fill → hold to settlement (no emergency exit)
+    - Opposite BUY stays alive (double insurance)
+
+  ETH/SOL/XRP (standard):
+    1. Check if SELL filled → close with profit
+    2. Step-down sell: when < 90s left in round, hit best bid if >= MIN_SELL_PRICE
+    3. Emergency market-sell: when < 90s left (EXIT_DEADLINE_S before round end)
+    4. ALL trades must clear by T+3:30 — last minute is dead (order book empties)
 
 To extend: add new exit strategies (trailing stop, etc.) here.
 """
@@ -18,7 +25,7 @@ import config as C
 import db
 from models import Position, Order
 from client import (
-    cancel_order, get_order_status, place_order, SELL_SIDE
+    cancel_order, get_order_status, place_order, get_best_bid, SELL_SIDE
 )
 from signals import get_signal_for_position
 
@@ -27,13 +34,8 @@ log = logging.getLogger("bot.exits")
 
 def manage_exits(client: ClobClient, conn: sqlite3.Connection) -> int:
     """
-    For each open position:
-    1. Check if SELL filled → close with profit
-    2. If past EXIT_DEADLINE → emergency market-sell
-
-    Args:
-        client: ClobClient instance
-        conn: SQLite connection
+    For each open position, apply the appropriate exit strategy.
+    Uses time-to-round-end (not elapsed since fill) for all deadlines.
 
     Returns:
         Number of positions closed
@@ -43,9 +45,13 @@ def manage_exits(client: ClobClient, conn: sqlite3.Connection) -> int:
 
     positions = db.get_open_positions(conn)
     for pos in positions:
+        round_end = pos.round_ts + C.ROUND_DURATION_S
+        time_left = round_end - now  # seconds until round settles
         elapsed = now - pos.opened_at
+        round_ended = time_left <= 0
+        is_lucky = pos.asset in C.LUCKY_SETTLEMENT
 
-        # ── Check SELL fill ──────────────────────────────────
+        # ── Check SELL fill (all assets) ─────────────────────
         if pos.sell_order and pos.status == "exiting":
             info = get_order_status(client, pos.sell_order)
             if info and info["size_matched"] > 0:
@@ -66,66 +72,103 @@ def manage_exits(client: ClobClient, conn: sqlite3.Connection) -> int:
                     conn.commit()
                     continue
 
-        # ── Signal-aware early exit (only if not already exiting) ──
-        if pos.status != "exiting" and elapsed >= 30:
-            signal = get_signal_for_position(pos.asset, pos.round_ts)
-            if signal and signal.confidence >= 0.7:
-                # Signal says direction X. If we hold the OPPOSITE side, we're in trouble.
-                # e.g., we hold DOWN but signal says UP → DOWN goes to $0
-                if signal.direction != pos.token_side:
-                    log.warning(
-                        f"⚠️ SIGNAL EXIT: {pos.asset} {pos.token_side} "
-                        f"— signal says {signal.direction} ({signal.confidence:.0%})"
-                    )
-                    _emergency_exit(client, conn, pos, now)
-                    closed += 1
-                    conn.commit()
-                    continue
+        # ── Round settled ────────────────────────────────────
+        if round_ended:
+            if is_lucky:
+                # BTC: hold to settlement — cancel sell, let Polymarket settle
+                if pos.sell_order:
+                    cancel_order(client, pos.sell_order)
+                    db.update_order_status(conn, pos.sell_order, "cancelled")
+                pnl = -(pos.entry_price * pos.entry_size)  # worst case
+                db.close_position(conn, pos.id, pnl, 0.0, now)
+                db.log_pnl(conn, now, "settlement", pnl, db.total_pnl(conn) + pnl)
+                log.info(
+                    f"🍀 SETTLEMENT: {pos.asset} {pos.token_side} | "
+                    f"bought ${pos.entry_price} × {pos.entry_size} | "
+                    f"awaiting payout (booked ${pnl:+.2f} pending)"
+                )
+            else:
+                # ETH/SOL/XRP: round expired without sell fill — loss
+                if pos.sell_order:
+                    cancel_order(client, pos.sell_order)
+                    db.update_order_status(conn, pos.sell_order, "cancelled")
+                pnl = -(pos.entry_price * pos.entry_size)
+                db.close_position(conn, pos.id, pnl, 0.0, now)
+                db.log_pnl(conn, now, "round_expired", pnl, db.total_pnl(conn) + pnl)
+                log.warning(
+                    f"⏰ ROUND EXPIRED: {pos.asset} {pos.token_side} | "
+                    f"bought ${pos.entry_price} × {pos.entry_size} | "
+                    f"P&L: ${pnl:+.2f} (sell never filled)"
+                )
+            closed += 1
+            conn.commit()
+            continue
 
-        # ── Emergency exit at T+4min (only if not already exiting) ──
-        if elapsed >= C.EXIT_DEADLINE_S and pos.status != "exiting":
+        # ── Below here: only non-lucky assets do step-down/emergency ──
+
+        if is_lucky:
+            # BTC just waits — either sell fills or we go to settlement
+            continue
+
+        # ── Step-down sell: when < SELL_STEPDOWN_S left before round end ──
+        # e.g. SELL_STEPDOWN_S=45 → step-down when < 45s left (after T+4:15)
+        if pos.status == "exiting" and time_left <= C.SELL_STEPDOWN_S:
+            rnd = db.get_round(conn, pos.round_ts, pos.asset)
+            if rnd:
+                token_id = rnd.up_token if pos.token_side == "UP" else rnd.down_token
+                best_bid = get_best_bid(client, token_id)
+                log.info(
+                    f"🔍 STEP-DOWN CHECK: {pos.asset} {pos.token_side} | "
+                    f"{time_left}s left | best_bid=${best_bid:.3f} | min=${C.MIN_SELL_PRICE}"
+                )
+                if best_bid >= C.MIN_SELL_PRICE:
+                    if pos.sell_order:
+                        cancel_order(client, pos.sell_order)
+                        db.update_order_status(conn, pos.sell_order, "cancelled")
+                    sell_oid = place_order(
+                        client, token_id, SELL_SIDE, best_bid, pos.entry_size
+                    )
+                    if sell_oid:
+                        db.insert_order(conn, Order(
+                            order_id=sell_oid, round_ts=pos.round_ts, asset=pos.asset,
+                            token_side=pos.token_side, order_type="SELL",
+                            price=best_bid, size=pos.entry_size,
+                            status="open", placed_at=now,
+                        ))
+                        db.update_position_sell(conn, pos.id, sell_oid, best_bid)
+                        pnl_est = (best_bid - pos.entry_price) * pos.entry_size
+                        log.info(
+                            f"📉 STEP-DOWN SELL: {pos.asset} {pos.token_side} | "
+                            f"bid ${best_bid:.2f} (est P&L: ${pnl_est:+.2f})"
+                        )
+                        conn.commit()
+                        continue
+                    else:
+                        log.warning(f"  Step-down place_order failed for {pos.asset}")
+            else:
+                log.warning(f"  Step-down: round not found for {pos.asset} {pos.round_ts}")
+
+        # ── Emergency exit: when < EXIT_DEADLINE_S left (T+3:30 = 90s left) ──
+        if time_left <= C.EXIT_DEADLINE_S and pos.status == "exiting":
             log.warning(
-                f"⚠️ EMERGENCY EXIT: {pos.asset} {pos.token_side} "
-                f"T+{elapsed}s (deadline {C.EXIT_DEADLINE_S}s)"
+                f"⚠️ EMERGENCY EXIT: {pos.asset} {pos.token_side} | "
+                f"{time_left}s left — market selling"
             )
             _emergency_exit(client, conn, pos, now)
             closed += 1
             conn.commit()
+            continue
 
-        # ── Force-close stale exiting positions at T+8min ────
-        elif elapsed >= C.EXIT_DEADLINE_S * 2 and pos.status == "exiting":
+        # ── Open position without sell order — place emergency sell ──
+        if time_left <= C.EXIT_DEADLINE_S and pos.status == "open":
             log.warning(
-                f"⚠️ FORCE CLOSE: {pos.asset} {pos.token_side} "
-                f"T+{elapsed}s — sell never filled, retrying market sell"
+                f"⚠️ NO SELL ORDER: {pos.asset} {pos.token_side} | "
+                f"{time_left}s left — emergency market sell"
             )
-            # Cancel the orphaned SELL order on CLOB
-            if pos.sell_order:
-                cancel_order(client, pos.sell_order)
-                db.update_order_status(conn, pos.sell_order, "cancelled")
-            # Attempt one final market sell to avoid inventory leak
-            rnd = db.get_round(conn, pos.round_ts, pos.asset)
-            if rnd:
-                token_id = rnd.up_token if pos.token_side == "UP" else rnd.down_token
-                sell_oid = place_order(
-                    client, token_id, SELL_SIDE,
-                    C.EMERGENCY_SELL_PRICE, pos.entry_size
-                )
-                if sell_oid:
-                    db.insert_order(conn, Order(
-                        order_id=sell_oid, round_ts=pos.round_ts, asset=pos.asset,
-                        token_side=pos.token_side, order_type="SELL",
-                        price=C.EMERGENCY_SELL_PRICE, size=pos.entry_size,
-                        status="open", placed_at=now,
-                    ))
-                    db.update_position_sell(conn, pos.id, sell_oid, C.EMERGENCY_SELL_PRICE)
-                    log.info(f"  Final market sell placed at ${C.EMERGENCY_SELL_PRICE}")
-                    conn.commit()
-                    continue  # let next tick detect the fill
-            # If no round found or sell failed — book total loss
-            pnl = -(pos.entry_price * pos.entry_size)
-            db.close_position(conn, pos.id, pnl, 0.0, now)
+            _emergency_exit(client, conn, pos, now)
             closed += 1
             conn.commit()
+            continue
 
     return closed
 
@@ -136,22 +179,14 @@ def _emergency_exit(
 ) -> None:
     """
     Force-exit a position: cancel SELL, market-sell at $0.01.
-
-    Args:
-        client: ClobClient instance
-        conn: SQLite connection
-        pos: Position to exit
-        now: current unix timestamp
+    Only used for non-lucky-settlement assets.
     """
-    # Cancel existing SELL if any
     if pos.sell_order:
         cancel_order(client, pos.sell_order)
         db.update_order_status(conn, pos.sell_order, "cancelled")
 
-    # Get token_id
     rnd = db.get_round(conn, pos.round_ts, pos.asset)
     if not rnd:
-        # Can't find round — close at total loss
         db.close_position(
             conn, pos.id,
             pnl=-(pos.entry_price * pos.entry_size),
@@ -161,7 +196,6 @@ def _emergency_exit(
 
     token_id = rnd.up_token if pos.token_side == "UP" else rnd.down_token
 
-    # Market sell at emergency price (accept any price)
     sell_oid = place_order(
         client, token_id, SELL_SIDE,
         C.EMERGENCY_SELL_PRICE, pos.entry_size
@@ -174,13 +208,10 @@ def _emergency_exit(
             price=C.EMERGENCY_SELL_PRICE, size=pos.entry_size,
             status="open", placed_at=now,
         ))
-        # Keep position as 'exiting' — the sell fill check in manage_exits()
-        # will close it with the actual fill price
         db.update_position_sell(conn, pos.id, sell_oid, C.EMERGENCY_SELL_PRICE)
-        conn.commit()  # Persist immediately — crash safety for CLOB orders
+        conn.commit()
         log.info(f"  Market sell placed at ${C.EMERGENCY_SELL_PRICE}, awaiting fill")
     else:
-        # No sell placed — close at total loss
         pnl = -(pos.entry_price * pos.entry_size)
         db.close_position(conn, pos.id, pnl, 0.0, now)
         log.warning(f"  Failed to place emergency sell, closed at loss")
