@@ -132,6 +132,7 @@ def manage_exits(client: ClobClient, conn: sqlite3.Connection) -> int:
 
         # ── Tier 3: Step-down to best bid when < 120s left ───
         # ONE SHOT: fires for "exiting" or "fallback" status.
+        # If best_bid is too low or sell fails, skip to tier 4 by setting status.
         if pos.status in ("exiting", "fallback") and time_left <= C.SELL_STEPDOWN_S:
             rnd = db.get_round(conn, pos.round_ts, pos.asset)
             if rnd:
@@ -166,6 +167,11 @@ def manage_exits(client: ClobClient, conn: sqlite3.Connection) -> int:
                         continue
                     else:
                         log.warning(f"  Step-down place_order failed for {pos.asset}")
+                # Book is empty or bid too low — mark as stepdown so tier 3
+                # doesn't fire again every 5s. Tier 4 will handle it.
+                db.update_position_status(conn, pos.id, "stepdown")
+                conn.commit()
+                continue
 
         # ── Tier 4: Stop-loss at $0.15 when < 90s left ───────
         # ONE SHOT: fires for "exiting", "fallback", or "stepdown".

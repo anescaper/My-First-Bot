@@ -20,14 +20,18 @@ from exits import manage_exits
 from cleanup import cleanup_old_rounds
 
 # ── Logging ──────────────────────────────────────────────────
-logging.basicConfig(
-    level=logging.INFO,
-    format="%(asctime)s [%(levelname)s] %(message)s",
-    handlers=[
-        logging.FileHandler(C.LOG_PATH),
-        logging.StreamHandler(),
-    ],
-)
+# Single handler to file only. Use `tail -f bot.log` to watch live.
+# Avoid StreamHandler — nohup redirects stdout to the same file, causing duplicates.
+root = logging.getLogger()
+root.setLevel(logging.INFO)
+# Clear any existing handlers to prevent duplicates on re-import
+root.handlers.clear()
+fh = logging.FileHandler(C.LOG_PATH)
+fh.setFormatter(logging.Formatter("%(asctime)s [%(levelname)s] %(message)s"))
+root.addHandler(fh)
+# Suppress noisy HTTP request logs from py_clob_client / httpx
+logging.getLogger("httpx").setLevel(logging.WARNING)
+logging.getLogger("httpcore").setLevel(logging.WARNING)
 log = logging.getLogger("bot")
 
 # ── Shutdown flag ────────────────────────────────────────────
