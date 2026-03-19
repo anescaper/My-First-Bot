@@ -384,3 +384,17 @@ def get_inactive_buy_orders(conn: sqlite3.Connection, current_round_ts: int) -> 
         (current_round_ts,)
     ).fetchall()
     return [Order(**dict(r)) for r in rows]
+
+
+def get_near_term_buy_orders(conn: sqlite3.Connection, current_round_ts: int,
+                              window_s: int = 3600) -> list[Order]:
+    """Get open BUY orders for rounds within the next `window_s` seconds.
+    Used by PAUSE mode brake: cancel near-term orders but keep far-future ones.
+    Excludes the currently active round (that's managed by exits)."""
+    cutoff_ts = current_round_ts + window_s
+    rows = conn.execute(
+        """SELECT * FROM orders WHERE status='open' AND order_type='BUY'
+           AND round_ts > ? AND round_ts <= ?""",
+        (current_round_ts, cutoff_ts)
+    ).fetchall()
+    return [Order(**dict(r)) for r in rows]

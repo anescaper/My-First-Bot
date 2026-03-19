@@ -247,3 +247,30 @@ def cancel_inactive_buys(client: ClobClient, conn: sqlite3.Connection) -> int:
     if count:
         log.warning(f"🚨 Cancelled {count} inactive BUY orders (kept active round)")
     return count
+
+
+def cancel_near_term_buys(client: ClobClient, conn: sqlite3.Connection) -> int:
+    """
+    PAUSE MODE: Cancel BUY orders for rounds within the next BRAKE_PAUSE_S (1 hour).
+    Keeps active round alive (managed by exits).
+    Keeps far-future orders alive (market may recover by then).
+    Discovery + pre-orders keep running — new far-future orders still get placed.
+
+    Returns:
+        Number of orders cancelled
+    """
+    now = int(time.time())
+    current_round_ts = (now // C.ROUND_DURATION_S) * C.ROUND_DURATION_S
+    near_orders = db.get_near_term_buy_orders(conn, current_round_ts, C.BRAKE_PAUSE_S)
+    count = 0
+    for order in near_orders:
+        cancel_order(client, order.order_id)
+        db.update_order_status(conn, order.order_id, "cancelled")
+        count += 1
+    conn.commit()
+    if count:
+        log.warning(
+            f"⏸️ PAUSE: Cancelled {count} BUY orders within next "
+            f"{C.BRAKE_PAUSE_S // 60} min (kept active + far-future)"
+        )
+    return count

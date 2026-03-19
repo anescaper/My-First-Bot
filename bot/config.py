@@ -37,6 +37,7 @@ LOOKAHEAD_HOURS: int = 4
 DISCOVERY_INTERVAL_S: int = 300       # discover new rounds every 5 min
 FILL_CHECK_INTERVAL_S: float = 1.0    # check fills every 1s (only active round polled)
 EXIT_DEADLINE_S: int = 90            # emergency exit when < 90s (1.5min) left in round
+BRAKE_PAUSE_S: int = 3600            # pause mode: cancel orders within this window (1 hour)
 
 # ── Budget ───────────────────────────────────────────────────
 # 4 assets × 2 orders × 19 × $0.27 = $41.04 per round set

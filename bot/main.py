@@ -14,7 +14,7 @@ import config as C
 import db
 from client import create_client
 from discovery import discover_rounds
-from orders import place_preorders, check_fills, cancel_all, cancel_inactive_buys
+from orders import place_preorders, check_fills, cancel_all, cancel_inactive_buys, cancel_near_term_buys
 from signals import process_signals
 from exits import manage_exits
 from cleanup import cleanup_old_rounds
@@ -79,6 +79,7 @@ def main():
     last_stats = 0
     last_round_summary = 0   # track which round we last logged
     brake_active = False
+    brake_activated_at = 0
     tick = 0
 
     while not _shutdown:
@@ -99,36 +100,43 @@ def main():
                 failures = db.get_brake_failures(conn, prev_round_ts)
                 if len(failures) >= 2 and not brake_active:
                     brake_active = True
+                    brake_activated_at = now
                     failed_desc = ", ".join(f"{a}@{ts}" for a, ts in failures)
                     log.warning(
-                        f"🚨 EMERGENCY BRAKE: {len(failures)} failures "
+                        f"⏸️ PAUSE MODE: {len(failures)} failures "
                         f"in last 2 rounds ({failed_desc})"
                     )
-                    log.warning("🚨 Step 1: Stopping new order generation")
-                    log.warning("🚨 Step 2: Cancelling all inactive BUY orders")
-                    cancel_inactive_buys(client, conn)
-                    log.warning("🚨 Step 3: Continuing active round until it ends")
+                    log.warning(
+                        f"⏸️ Cancelling orders within next "
+                        f"{C.BRAKE_PAUSE_S // 60} min — "
+                        f"keeping far-future orders + discovery alive"
+                    )
+                    cancel_near_term_buys(client, conn)
                 elif len(failures) < 2 and brake_active:
                     brake_active = False
-                    log.info("✅ Emergency brake released — resuming normal operation")
+                    log.info("✅ Pause mode released — resuming full operation")
 
-            # ── Drawdown circuit breaker ───────────────────
-            daily_loss = db.today_pnl(conn)
-            if daily_loss <= -C.DAILY_DRAWDOWN_LIMIT:
-                if tick % 100 == 1:  # Log once every ~100s
-                    log.warning(
-                        f"🛑 DRAWDOWN LIMIT: ${daily_loss:+.2f} today "
-                        f"(limit -${C.DAILY_DRAWDOWN_LIMIT}). No new orders."
-                    )
-            elif brake_active:
-                if tick % 100 == 1:
-                    log.warning("🚨 BRAKE ACTIVE: no new orders until failed sells clear")
-            else:
-                # ── Discovery: every DISCOVERY_INTERVAL ──────────
-                if now - last_discovery > C.DISCOVERY_INTERVAL_S:
+            # ── Discovery + pre-orders: ALWAYS run (even during pause) ──
+            # During pause, discovery still finds rounds and pre-orders still
+            # places far-future orders. Only near-term orders get cancelled.
+            if now - last_discovery > C.DISCOVERY_INTERVAL_S:
+                # Drawdown check
+                daily_loss = db.today_pnl(conn)
+                if daily_loss <= -C.DAILY_DRAWDOWN_LIMIT:
+                    if tick % 100 == 1:
+                        log.warning(
+                            f"🛑 DRAWDOWN LIMIT: ${daily_loss:+.2f} today "
+                            f"(limit -${C.DAILY_DRAWDOWN_LIMIT}). No new orders."
+                        )
+                else:
                     discover_rounds(conn)
                     place_preorders(client, conn)
                     last_discovery = now
+
+                    # During pause: continuously cancel near-term orders
+                    # (new ones may have been placed by pre-orders)
+                    if brake_active:
+                        cancel_near_term_buys(client, conn)
 
             # ── Signals: every tick (log only, no cancellation) ──
             process_signals(conn)
