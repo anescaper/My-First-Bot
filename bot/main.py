@@ -71,12 +71,36 @@ def main():
     last_fill_check = 0
     last_exit_check = 0
     last_stats = 0
+    last_brake_check = 0
+    brake_active = False
     tick = 0
 
     while not _shutdown:
         try:
             now = time.time()
             tick += 1
+
+            # ── Emergency brake: 2+ assets failed to sell in last 2 rounds ──
+            if now - last_brake_check > 10:
+                failed_assets = db.recent_failed_sell_assets(conn, window_s=600)
+                if len(failed_assets) >= 2 and not brake_active:
+                    brake_active = True
+                    log.warning(
+                        f"🚨 EMERGENCY BRAKE: {len(failed_assets)} assets "
+                        f"({', '.join(sorted(failed_assets))}) failed to sell "
+                        f"in last 2 rounds — cancelling ALL orders"
+                    )
+                    try:
+                        result = client.cancel_all()
+                        cancelled = result.get("canceled", [])
+                        log.warning(f"🚨 Cancelled {len(cancelled)} orders via API")
+                    except Exception as e:
+                        log.error(f"Brake cancel_all failed: {e}")
+                    cancel_all(client, conn)
+                elif len(failed_assets) < 2 and brake_active:
+                    brake_active = False
+                    log.info("✅ Emergency brake released — resuming normal operation")
+                last_brake_check = now
 
             # ── Drawdown circuit breaker ───────────────────
             daily_loss = db.today_pnl(conn)
@@ -86,6 +110,9 @@ def main():
                         f"🛑 DRAWDOWN LIMIT: ${daily_loss:+.2f} today "
                         f"(limit -${C.DAILY_DRAWDOWN_LIMIT}). No new orders."
                     )
+            elif brake_active:
+                if tick % 100 == 1:
+                    log.warning("🚨 BRAKE ACTIVE: no new orders until failed sells clear")
             else:
                 # ── Discovery: every DISCOVERY_INTERVAL ──────────
                 if now - last_discovery > C.DISCOVERY_INTERVAL_S:

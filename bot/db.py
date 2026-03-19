@@ -297,3 +297,19 @@ def log_pnl(conn: sqlite3.Connection, ts: int, event: str,
         "INSERT INTO pnl_log (ts, event, amount, balance) VALUES (?,?,?,?)",
         (ts, event, amount, balance)
     )
+
+
+# ── Emergency Brake ──────────────────────────────────────────
+
+def recent_failed_sell_assets(conn: sqlite3.Connection, window_s: int = 600) -> set[str]:
+    """Return set of distinct assets that had a failed sell (round_expired or
+    emergency exit with sell_price=0) within the last `window_s` seconds.
+    2 rounds = 600s by default."""
+    import time
+    cutoff = int(time.time()) - window_s
+    rows = conn.execute(
+        """SELECT DISTINCT asset FROM positions
+           WHERE status='closed' AND sell_price <= 0.01 AND closed_at >= ?""",
+        (cutoff,)
+    ).fetchall()
+    return {r[0] for r in rows}
