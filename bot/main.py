@@ -8,6 +8,7 @@ To extend: add new tick handlers in the main loop.
 import time
 import signal
 import logging
+from datetime import datetime, timezone, timedelta
 
 import config as C
 import db
@@ -76,7 +77,7 @@ def main():
     last_fill_check = 0
     last_exit_check = 0
     last_stats = 0
-    last_brake_check = 0
+    last_round_summary = 0   # track which round we last logged
     brake_active = False
     tick = 0
 
@@ -85,25 +86,31 @@ def main():
             now = time.time()
             tick += 1
 
-            # ── Emergency brake: 2+ assets failed to sell in last 2 rounds ──
-            # Step 1: Stop new order generation
-            # Step 2: Cancel all inactive (future) round BUY orders
-            # Step 3: Keep processing active round (fills + exits) until it ends
-            if now - last_brake_check > 10:
-                failed_assets = db.recent_failed_sell_assets(conn, window_s=600)
-                if len(failed_assets) >= 2 and not brake_active:
+            # ── Round summary table: log at end of each 5-min round ──
+            current_round_ts = (int(now) // C.ROUND_DURATION_S) * C.ROUND_DURATION_S
+            prev_round_ts = current_round_ts - C.ROUND_DURATION_S
+            # When a new round starts, log the summary of the round that just ended
+            if prev_round_ts > last_round_summary:
+                _log_round_summary(conn, prev_round_ts)
+                last_round_summary = prev_round_ts
+
+                # ── Emergency brake: check prev + prev-prev round ──
+                # 2 rounds × 4 assets = 8 positions. If 2+ failures → brake
+                failures = db.get_brake_failures(conn, prev_round_ts)
+                if len(failures) >= 2 and not brake_active:
                     brake_active = True
+                    failed_desc = ", ".join(f"{a}@{ts}" for a, ts in failures)
                     log.warning(
-                        f"🚨 EMERGENCY BRAKE: {len(failed_assets)} assets "
-                        f"({', '.join(sorted(failed_assets))}) failed to sell "
-                        f"in last 2 rounds"
+                        f"🚨 EMERGENCY BRAKE: {len(failures)} failures "
+                        f"in last 2 rounds ({failed_desc})"
                     )
-                    # Cancel only future/inactive BUY orders, keep active round alive
+                    log.warning("🚨 Step 1: Stopping new order generation")
+                    log.warning("🚨 Step 2: Cancelling all inactive BUY orders")
                     cancel_inactive_buys(client, conn)
-                elif len(failed_assets) < 2 and brake_active:
+                    log.warning("🚨 Step 3: Continuing active round until it ends")
+                elif len(failures) < 2 and brake_active:
                     brake_active = False
                     log.info("✅ Emergency brake released — resuming normal operation")
-                last_brake_check = now
 
             # ── Drawdown circuit breaker ───────────────────
             daily_loss = db.today_pnl(conn)
@@ -160,6 +167,54 @@ def main():
     _log_stats(conn)
     conn.close()
     log.info("Bot stopped.")
+
+
+def _log_round_summary(conn, round_ts: int):
+    """Log a table summarizing all 4 assets for a completed round."""
+    summary = db.get_round_summary(conn, round_ts)
+    if not summary:
+        return
+
+    # Convert round_ts to human-readable ET time
+    et = datetime.fromtimestamp(round_ts, tz=timezone(timedelta(hours=-4)))
+    end_et = et + timedelta(seconds=C.ROUND_DURATION_S)
+    time_label = f"{et.strftime('%I:%M')}-{end_et.strftime('%I:%M %p')} ET"
+
+    log.info("=" * 70)
+    log.info(f"📋 ROUND SUMMARY: {time_label} (ts={round_ts})")
+    log.info("-" * 70)
+    log.info(f"{'Asset':>5s} | {'Side':>4s} | {'Buy Cost':>9s} | {'Sell Rev':>9s} | {'P&L':>8s} | Result")
+    log.info("-" * 70)
+
+    total_pnl = 0.0
+    failures = 0
+
+    for asset in C.ASSETS:
+        info = summary.get(asset, {"result": "no_fill"})
+        result = info["result"]
+
+        if result == "no_fill":
+            log.info(f"{asset.upper():>5s} | {'—':>4s} | {'—':>9s} | {'—':>9s} | {'—':>8s} | no_fill")
+        elif result == "active":
+            buy_cost = info.get("buy_cost", 0)
+            log.info(f"{asset.upper():>5s} | {info.get('side', '?'):>4s} | ${buy_cost:>7.2f} | {'pending':>9s} | {'—':>8s} | active")
+        else:
+            buy_cost = info.get("buy_cost", 0)
+            sell_rev = info.get("sell_revenue", 0) or 0
+            pnl = info.get("pnl", 0) or 0
+            total_pnl += pnl
+            marker = "✅" if result == "success" else "❌"
+            if result == "failure":
+                failures += 1
+            log.info(
+                f"{asset.upper():>5s} | {info.get('side', '?'):>4s} | "
+                f"${buy_cost:>7.2f} | ${sell_rev:>7.2f} | "
+                f"${pnl:>+7.2f} | {marker} {result}"
+            )
+
+    log.info("-" * 70)
+    log.info(f"{'TOTAL':>5s} | {'':>4s} | {'':>9s} | {'':>9s} | ${total_pnl:>+7.2f} | {failures} failure(s)")
+    log.info("=" * 70)
 
 
 def _log_stats(conn):

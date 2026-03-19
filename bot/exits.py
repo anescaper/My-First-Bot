@@ -1,18 +1,14 @@
 """
-Exits — manage open positions, detect SELL fills, settlement, emergency exit.
+Exits — manage open positions, detect SELL fills, step-down, emergency exit.
 
-Exit logic (split by asset):
-  BTC (lucky settlement):
-    - Try SELL at $0.48 like normal
-    - If sell fills → profit exit (same as others)
-    - If sell doesn't fill → hold to settlement (no emergency exit)
-    - Opposite BUY stays alive (double insurance)
-
-  ETH/SOL/XRP (standard):
+Exit logic (unified for all assets, v5):
     1. Check if SELL filled → close with profit
-    2. Step-down sell: when < 90s left in round, hit best bid if >= MIN_SELL_PRICE
-    3. Emergency market-sell: when < 90s left (EXIT_DEADLINE_S before round end)
-    4. ALL trades must clear by T+3:30 — last minute is dead (order book empties)
+    2. Step-down sell: when < SELL_STEPDOWN_S left, hit best bid if >= MIN_SELL_PRICE
+    3. Emergency market-sell: when < EXIT_DEADLINE_S left
+    4. Round expired: cancel sell, book loss
+
+Failure definition: sell_revenue < buy_cost ($0.27 × 19 = $5.13)
+If 2+ failures across current + previous round → emergency brake in main.py
 
 To extend: add new exit strategies (trailing stop, etc.) here.
 """

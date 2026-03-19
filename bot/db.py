@@ -308,20 +308,72 @@ def log_pnl(conn: sqlite3.Connection, ts: int, event: str,
     )
 
 
-# ── Emergency Brake ──────────────────────────────────────────
+# ── Round Summary & Emergency Brake ──────────────────────────
 
-def recent_failed_sell_assets(conn: sqlite3.Connection, window_s: int = 600) -> set[str]:
-    """Return set of distinct assets that had a failed sell (round_expired or
-    emergency exit with sell_price=0) within the last `window_s` seconds.
-    2 rounds = 600s by default."""
-    import time
-    cutoff = int(time.time()) - window_s
-    rows = conn.execute(
-        """SELECT DISTINCT asset FROM positions
-           WHERE status='closed' AND sell_price <= 0.01 AND closed_at >= ?""",
-        (cutoff,)
-    ).fetchall()
-    return {r[0] for r in rows}
+def get_round_summary(conn: sqlite3.Connection, round_ts: int) -> dict[str, dict]:
+    """Get summary of all positions for a given round timestamp.
+    Returns dict: asset -> {side, entry_price, entry_size, sell_price, pnl, status, result}
+    result is 'success', 'failure', or 'no_fill'
+    """
+    import config as C
+    summary = {}
+    for asset in C.ASSETS:
+        positions = conn.execute(
+            "SELECT * FROM positions WHERE round_ts=? AND asset=?",
+            (round_ts, asset)
+        ).fetchall()
+
+        if not positions:
+            summary[asset] = {"result": "no_fill"}
+            continue
+
+        for row in positions:
+            p = Position(**dict(row))
+            buy_cost = p.entry_price * p.entry_size
+            sell_revenue = (p.sell_price or 0) * p.entry_size if p.status == "closed" else None
+
+            if p.status != "closed":
+                result = "active"
+            elif sell_revenue is not None and sell_revenue >= buy_cost:
+                result = "success"
+            else:
+                result = "failure"
+
+            summary[asset] = {
+                "side": p.token_side,
+                "entry_price": p.entry_price,
+                "entry_size": p.entry_size,
+                "sell_price": p.sell_price,
+                "buy_cost": buy_cost,
+                "sell_revenue": sell_revenue,
+                "pnl": p.pnl,
+                "status": p.status,
+                "result": result,
+            }
+    return summary
+
+
+def count_round_failures(conn: sqlite3.Connection, round_ts: int) -> int:
+    """Count how many assets failed in a given round.
+    Failure = closed position where sell_revenue < buy_cost."""
+    summary = get_round_summary(conn, round_ts)
+    return sum(1 for v in summary.values() if v["result"] == "failure")
+
+
+def get_brake_failures(conn: sqlite3.Connection, current_round_ts: int) -> list[tuple[str, int]]:
+    """Check current round + previous round for failures.
+    Returns list of (asset, round_ts) that failed."""
+    import config as C
+    prev_round_ts = current_round_ts - C.ROUND_DURATION_S
+    failures = []
+
+    for round_ts in [prev_round_ts, current_round_ts]:
+        summary = get_round_summary(conn, round_ts)
+        for asset, info in summary.items():
+            if info["result"] == "failure":
+                failures.append((asset, round_ts))
+
+    return failures
 
 
 def get_inactive_buy_orders(conn: sqlite3.Connection, current_round_ts: int) -> list[Order]:
