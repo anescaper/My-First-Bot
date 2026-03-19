@@ -62,14 +62,17 @@ def create_client() -> ClobClient:
         signature_type=2,
         funder=read_secret("polymarket_funder_address"),
     )
-    # Approve token transfers for the exchange (needed for SELL orders)
-    try:
-        params = BalanceAllowanceParams(asset_type=AssetType.COLLATERAL, signature_type=2)
-        client.update_balance_allowance(params)
-        log.info("ClobClient initialized (allowances set)")
-    except Exception as e:
-        log.warning(f"update_balance_allowance failed: {e}")
-        log.info("ClobClient initialized")
+    # Approve token transfers for the exchange
+    # COLLATERAL = USDC (for BUY orders)
+    # CONDITIONAL = tokens (for SELL orders — this was missing and caused sell failures)
+    for asset_type in [AssetType.COLLATERAL, AssetType.CONDITIONAL]:
+        try:
+            params = BalanceAllowanceParams(asset_type=asset_type, signature_type=2)
+            client.update_balance_allowance(params)
+            log.info(f"Allowance set: {asset_type}")
+        except Exception as e:
+            log.warning(f"Allowance {asset_type} failed: {e}")
+    log.info("ClobClient initialized")
     return client
 
 
@@ -79,18 +82,22 @@ def _delay():
 
 
 def _refresh_allowance(client: ClobClient) -> bool:
-    """Refresh COLLATERAL allowance before SELL orders. Returns True on success."""
-    for attempt in range(3):
-        try:
-            params = BalanceAllowanceParams(asset_type=AssetType.COLLATERAL, signature_type=2)
-            client.update_balance_allowance(params)
-            time.sleep(0.5)  # give chain time to confirm allowance
-            return True
-        except Exception as e:
-            log.warning(f"Allowance refresh attempt {attempt+1}/3 failed: {e}")
-            time.sleep(1.0)
-    log.error("Allowance refresh failed after 3 attempts")
-    return False
+    """Refresh BOTH COLLATERAL and CONDITIONAL allowance. Returns True if at least one succeeds."""
+    success = False
+    for asset_type in [AssetType.COLLATERAL, AssetType.CONDITIONAL]:
+        for attempt in range(3):
+            try:
+                params = BalanceAllowanceParams(asset_type=asset_type, signature_type=2)
+                client.update_balance_allowance(params)
+                time.sleep(0.75)
+                success = True
+                break
+            except Exception as e:
+                log.warning(f"Allowance {asset_type} attempt {attempt+1}/3 failed: {e}")
+                time.sleep(0.75)
+    if not success:
+        log.error("All allowance refreshes failed")
+    return success
 
 
 def place_order(client: ClobClient, token_id: str, side: str,
@@ -111,10 +118,6 @@ def place_order(client: ClobClient, token_id: str, side: str,
     max_attempts = 3 if side == SELL else 1
     for attempt in range(max_attempts):
         try:
-            if side == SELL:
-                if not _refresh_allowance(client):
-                    continue  # retry after failed allowance
-
             args = OrderArgs(price=price, size=size, side=side, token_id=token_id)
             signed = client.create_order(args)
             result = client.post_order(signed, OrderType.GTC)
@@ -125,17 +128,17 @@ def place_order(client: ClobClient, token_id: str, side: str,
                 return oid
             else:
                 err_msg = str(result)
-                if "allowance" in err_msg.lower() and attempt < max_attempts - 1:
-                    log.warning(f"SELL allowance error (attempt {attempt+1}/{max_attempts}), retrying...")
-                    time.sleep(1.0)
+                if "allowance" in err_msg.lower() and side == SELL and attempt < max_attempts - 1:
+                    log.warning(f"SELL allowance error (attempt {attempt+1}/{max_attempts}), refreshing...")
+                    _refresh_allowance(client)
                     continue
                 log.warning(f"Order rejected: {result}")
                 return None
         except Exception as e:
             err_str = str(e)
-            if "allowance" in err_str.lower() and attempt < max_attempts - 1:
-                log.warning(f"SELL allowance error (attempt {attempt+1}/{max_attempts}), retrying...")
-                time.sleep(1.0)
+            if "allowance" in err_str.lower() and side == SELL and attempt < max_attempts - 1:
+                log.warning(f"SELL allowance error (attempt {attempt+1}/{max_attempts}), refreshing...")
+                _refresh_allowance(client)
                 continue
             log.error(f"place_order failed: {e}")
             _delay()
