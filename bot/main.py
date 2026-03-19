@@ -56,7 +56,12 @@ def main():
     log.info("=" * 50)
 
     client = create_client()
+
+    # Wipe DB on startup — all real orders are cancelled anyway, stale DB state
+    # causes ghost orders, fake brake triggers, and skipped rounds
+    db.wipe_db()
     conn = db.init_db()
+    log.info("Startup: DB wiped (clean slate)")
 
     # Cancel all existing orders on Polymarket to prevent duplicates from previous runs
     try:

@@ -8,7 +8,16 @@ import sqlite3
 from typing import Optional
 from models import Round, Order, Position
 
+import os
 import config as C
+
+
+def wipe_db() -> None:
+    """Delete the DB file entirely. Called on startup for a clean slate."""
+    try:
+        os.remove(C.BOT_DB_PATH)
+    except FileNotFoundError:
+        pass
 
 
 def init_db() -> sqlite3.Connection:
