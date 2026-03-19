@@ -225,3 +225,25 @@ def cancel_all(client: ClobClient, conn: sqlite3.Connection) -> int:
     conn.commit()
     log.warning(f"🛑 Cancelled {count} orders")
     return count
+
+
+def cancel_inactive_buys(client: ClobClient, conn: sqlite3.Connection) -> int:
+    """
+    Cancel BUY orders for non-active rounds only.
+    Keeps active round orders (fills + sells) untouched.
+
+    Returns:
+        Number of orders cancelled
+    """
+    now = int(time.time())
+    current_round_ts = (now // C.ROUND_DURATION_S) * C.ROUND_DURATION_S
+    inactive_orders = db.get_inactive_buy_orders(conn, current_round_ts)
+    count = 0
+    for order in inactive_orders:
+        cancel_order(client, order.order_id)
+        db.update_order_status(conn, order.order_id, "cancelled")
+        count += 1
+    conn.commit()
+    if count:
+        log.warning(f"🚨 Cancelled {count} inactive BUY orders (kept active round)")
+    return count

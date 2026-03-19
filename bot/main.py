@@ -13,7 +13,7 @@ import config as C
 import db
 from client import create_client
 from discovery import discover_rounds
-from orders import place_preorders, check_fills, cancel_all
+from orders import place_preorders, check_fills, cancel_all, cancel_inactive_buys
 from signals import process_signals
 from exits import manage_exits
 from cleanup import cleanup_old_rounds
@@ -81,6 +81,9 @@ def main():
             tick += 1
 
             # ── Emergency brake: 2+ assets failed to sell in last 2 rounds ──
+            # Step 1: Stop new order generation
+            # Step 2: Cancel all inactive (future) round BUY orders
+            # Step 3: Keep processing active round (fills + exits) until it ends
             if now - last_brake_check > 10:
                 failed_assets = db.recent_failed_sell_assets(conn, window_s=600)
                 if len(failed_assets) >= 2 and not brake_active:
@@ -88,15 +91,10 @@ def main():
                     log.warning(
                         f"🚨 EMERGENCY BRAKE: {len(failed_assets)} assets "
                         f"({', '.join(sorted(failed_assets))}) failed to sell "
-                        f"in last 2 rounds — cancelling ALL orders"
+                        f"in last 2 rounds"
                     )
-                    try:
-                        result = client.cancel_all()
-                        cancelled = result.get("canceled", [])
-                        log.warning(f"🚨 Cancelled {len(cancelled)} orders via API")
-                    except Exception as e:
-                        log.error(f"Brake cancel_all failed: {e}")
-                    cancel_all(client, conn)
+                    # Cancel only future/inactive BUY orders, keep active round alive
+                    cancel_inactive_buys(client, conn)
                 elif len(failed_assets) < 2 and brake_active:
                     brake_active = False
                     log.info("✅ Emergency brake released — resuming normal operation")

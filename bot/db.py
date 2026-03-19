@@ -313,3 +313,13 @@ def recent_failed_sell_assets(conn: sqlite3.Connection, window_s: int = 600) -> 
         (cutoff,)
     ).fetchall()
     return {r[0] for r in rows}
+
+
+def get_inactive_buy_orders(conn: sqlite3.Connection, current_round_ts: int) -> list[Order]:
+    """Get open BUY orders for rounds that are NOT currently active.
+    These are future pre-orders that should be cancelled during brake."""
+    rows = conn.execute(
+        "SELECT * FROM orders WHERE status='open' AND order_type='BUY' AND round_ts != ?",
+        (current_round_ts,)
+    ).fetchall()
+    return [Order(**dict(r)) for r in rows]
