@@ -225,7 +225,7 @@ def sum_open_order_cost(conn: sqlite3.Connection) -> float:
 def sum_open_position_cost(conn: sqlite3.Connection) -> float:
     """Total capital locked in open positions (entry_price × entry_size)."""
     return conn.execute(
-        "SELECT COALESCE(SUM(entry_price * entry_size), 0) FROM positions WHERE status IN ('open', 'exiting', 'holding')"
+        "SELECT COALESCE(SUM(entry_price * entry_size), 0) FROM positions WHERE status IN ('open', 'exiting', 'stepdown', 'emergency')"
     ).fetchone()[0]
 
 
@@ -254,7 +254,7 @@ def get_positions_for_round(conn: sqlite3.Connection, round_ts: int, asset: str)
 
 def get_open_positions(conn: sqlite3.Connection) -> list[Position]:
     rows = conn.execute(
-        "SELECT * FROM positions WHERE status IN ('open', 'exiting', 'holding')"
+        "SELECT * FROM positions WHERE status IN ('open', 'exiting', 'stepdown', 'emergency')"
     ).fetchall()
     return [Position(**dict(r)) for r in rows]
 
@@ -294,8 +294,16 @@ def total_pnl(conn: sqlite3.Connection) -> float:
 
 def count_open_positions(conn: sqlite3.Connection) -> int:
     return conn.execute(
-        "SELECT COUNT(*) FROM positions WHERE status IN ('open', 'exiting', 'holding')"
+        "SELECT COUNT(*) FROM positions WHERE status IN ('open', 'exiting', 'stepdown', 'emergency')"
     ).fetchone()[0]
+
+
+def update_position_status(conn: sqlite3.Connection, pos_id: int, status: str) -> None:
+    """Update position status (e.g. exiting -> stepdown -> emergency)."""
+    conn.execute(
+        "UPDATE positions SET status=? WHERE id=?",
+        (status, pos_id)
+    )
 
 
 # ── P&L Log ──────────────────────────────────────────────────
@@ -312,8 +320,9 @@ def log_pnl(conn: sqlite3.Connection, ts: int, event: str,
 
 def get_round_summary(conn: sqlite3.Connection, round_ts: int) -> dict[str, dict]:
     """Get summary of all positions for a given round timestamp.
-    Returns dict: asset -> {side, entry_price, entry_size, sell_price, pnl, status, result}
-    result is 'success', 'failure', or 'no_fill'
+    Aggregates across multiple positions for the same asset (e.g. partial fills).
+    Returns dict: asset -> {side, buy_cost, sell_revenue, pnl, result}
+    result is 'success', 'failure', 'active', or 'no_fill'
     """
     import config as C
     summary = {}
@@ -327,29 +336,40 @@ def get_round_summary(conn: sqlite3.Connection, round_ts: int) -> dict[str, dict
             summary[asset] = {"result": "no_fill"}
             continue
 
+        # Aggregate across all positions for this asset/round
+        total_buy_cost = 0.0
+        total_sell_revenue = 0.0
+        total_pnl = 0.0
+        any_active = False
+        side = None
+
         for row in positions:
             p = Position(**dict(row))
-            buy_cost = p.entry_price * p.entry_size
-            sell_revenue = (p.sell_price or 0) * p.entry_size if p.status == "closed" else None
+            total_buy_cost += p.entry_price * p.entry_size
+            if side is None:
+                side = p.token_side
 
-            if p.status != "closed":
-                result = "active"
-            elif sell_revenue is not None and sell_revenue >= buy_cost:
-                result = "success"
+            if p.status not in ("closed",):
+                any_active = True
             else:
-                result = "failure"
+                sell_rev = (p.sell_price or 0) * p.entry_size
+                total_sell_revenue += sell_rev
+                total_pnl += p.pnl or 0
 
-            summary[asset] = {
-                "side": p.token_side,
-                "entry_price": p.entry_price,
-                "entry_size": p.entry_size,
-                "sell_price": p.sell_price,
-                "buy_cost": buy_cost,
-                "sell_revenue": sell_revenue,
-                "pnl": p.pnl,
-                "status": p.status,
-                "result": result,
-            }
+        if any_active:
+            result = "active"
+        elif total_sell_revenue >= total_buy_cost:
+            result = "success"
+        else:
+            result = "failure"
+
+        summary[asset] = {
+            "side": side,
+            "buy_cost": total_buy_cost,
+            "sell_revenue": total_sell_revenue if not any_active else None,
+            "pnl": total_pnl if not any_active else None,
+            "result": result,
+        }
     return summary
 
 

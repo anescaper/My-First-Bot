@@ -58,19 +58,26 @@ def main():
 
     client = create_client()
 
-    # Wipe DB on startup — all real orders are cancelled anyway, stale DB state
-    # causes ghost orders, fake pause triggers, and skipped rounds
+    # Cancel all existing orders on Polymarket FIRST, before wiping DB.
+    # If cancel fails, retry — never wipe DB with live orders on exchange.
+    for attempt in range(3):
+        try:
+            result = client.cancel_all()
+            cancelled = result.get("canceled", [])
+            log.info(f"Startup: cancelled {len(cancelled)} stale orders on Polymarket")
+            break
+        except Exception as e:
+            log.warning(f"Startup cancel_all attempt {attempt+1}/3 failed: {e}")
+            if attempt < 2:
+                time.sleep(2)
+            else:
+                log.error("Could not cancel orders on exchange — aborting startup")
+                raise SystemExit("Failed to cancel orders on Polymarket after 3 attempts")
+
+    # NOW wipe DB — safe because exchange orders are already cancelled
     db.wipe_db()
     conn = db.init_db()
     log.info("Startup: DB wiped (clean slate)")
-
-    # Cancel all existing orders on Polymarket to prevent duplicates from previous runs
-    try:
-        result = client.cancel_all()
-        cancelled = result.get("canceled", [])
-        log.info(f"Startup: cancelled {len(cancelled)} stale orders on Polymarket")
-    except Exception as e:
-        log.warning(f"Startup cancel_all failed: {e}")
 
     last_discovery = 0
     last_cleanup = 0
@@ -111,10 +118,22 @@ def main():
                         f"(current + next). Dead zone: next {C.BRAKE_PAUSE_S // 60} min."
                     )
                     cancel_near_term_buys(client, conn)
-                elif len(failures) < 2 and pause_active:
-                    pause_active = False
-                    pause_round_ts = 0
-                    log.info("✅ Pause mode released — resuming full operation")
+                elif pause_active and len(failures) < 2:
+                    # Only release pause if minimum duration has elapsed
+                    pause_elapsed = current_round_ts - pause_round_ts
+                    if pause_elapsed >= C.BRAKE_PAUSE_S:
+                        pause_active = False
+                        pause_round_ts = 0
+                        log.info(
+                            f"✅ Pause mode released after "
+                            f"{pause_elapsed // 60} min — resuming full operation"
+                        )
+                    elif tick % 60 == 0:
+                        remaining = C.BRAKE_PAUSE_S - pause_elapsed
+                        log.info(
+                            f"⏸️ Pause active — {remaining // 60} min remaining "
+                            f"(no failures, waiting for minimum duration)"
+                        )
 
             # ── Discovery + pre-orders: ALWAYS run (even during pause) ──
             # During pause, discovery still finds rounds and pre-orders still
@@ -130,11 +149,12 @@ def main():
                         )
                 else:
                     discover_rounds(conn)
-                    place_preorders(client, conn)
+                    # During pause: pass context so pre-orders skip near-term rounds
+                    place_preorders(client, conn, pause_active, pause_round_ts)
                     last_discovery = now
 
-                    # During pause: continuously cancel near-term orders
-                    # (new ones may have been placed by pre-orders)
+                    # During pause: cancel any near-term orders that might
+                    # have been placed before pause activated (from previous cycles)
                     if pause_active:
                         cancel_near_term_buys(client, conn)
 

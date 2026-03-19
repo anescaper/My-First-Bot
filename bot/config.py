@@ -16,8 +16,8 @@ TIMEFRAME: str = "5m"
 ROUND_DURATION_S: int = 300
 
 # ── Exit Strategy ──────────────────────────────────────────
-# All assets: cancel opposite BUY on fill, emergency exit if sell fails
-LUCKY_SETTLEMENT: set[str] = set()
+# All assets use unified exit: cancel opposite BUY on fill,
+# step-down sell, emergency exit. No special cases.
 
 # ── Order Pricing ────────────────────────────────────────────
 BUY_PRICE: float = 0.27       # buy on both UP and DOWN at this price
