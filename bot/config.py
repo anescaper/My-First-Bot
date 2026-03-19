@@ -4,10 +4,10 @@ No parameter should ever be hardcoded elsewhere.
 
 To extend: add new constants here, import in the module that needs them.
 
-Strategy: Symmetric Vol Harvest v5 (unified exit)
+Strategy: Symmetric Vol Harvest v5.2 (waterfall exit)
   - BUY both UP and DOWN at $0.27 (4h early, GTC)
-  - When one side fills, cancel opposite BUY, place SELL at $0.48
-  - All assets use the same exit logic (no lucky settlement)
+  - When one side fills, cancel opposite BUY
+  - Exit waterfall: $0.48 (30s) → $0.35 → step-down (best bid) → $0.15 stop-loss
 """
 
 # ── Assets ───────────────────────────────────────────────────
@@ -15,28 +15,31 @@ ASSETS: list[str] = ["btc", "eth", "sol", "xrp"]
 TIMEFRAME: str = "5m"
 ROUND_DURATION_S: int = 300
 
-# ── Exit Strategy ──────────────────────────────────────────
-# All assets use unified exit: cancel opposite BUY on fill,
-# step-down sell, emergency exit. No special cases.
+# ── Exit Waterfall ───────────────────────────────────────────
+# Tier 1: SELL at $0.48 immediately on fill (dream price, 30s window)
+# Tier 2: Drop to $0.35 if $0.48 doesn't fill in 30s
+# Tier 3: Step-down to best bid when < 120s left (one shot)
+# Tier 4: Stop-loss at $0.15 when < 90s left (one shot)
 
 # ── Order Pricing ────────────────────────────────────────────
 BUY_PRICE: float = 0.27       # buy on both UP and DOWN at this price
-SELL_TARGET: float = 0.48     # sell on rebound
-MIN_SELL_PRICE: float = 0.30  # minimum price to accept on step-down sell (must be > BUY_PRICE)
-SELL_STEPDOWN_S: int = 120    # step-down when < 120s (2min) left in round
+SELL_TARGET: float = 0.48     # tier 1: dream price (30s window)
+SELL_FALLBACK: float = 0.35   # tier 2: realistic target after 30s
+SELL_FALLBACK_S: int = 30     # seconds to wait at dream price before falling back
+MIN_SELL_PRICE: float = 0.30  # minimum price to accept on step-down sell
+SELL_STEPDOWN_S: int = 120    # tier 3: step-down when < 120s (2min) left in round
 
 # ── Order Sizing (shares) ───────────────────────────────────
 # Symmetric: same size on both sides
 # 19 × $0.27 = $5.13 per order, $10.26 per round-asset pair
-# Start small for data collection, scale up once win rate is known
 BUY_SIZE: int = 19
-EMERGENCY_SELL_PRICE: float = 0.01
+EMERGENCY_SELL_PRICE: float = 0.15    # tier 4: stop-loss (not $0.01)
 
 # ── Timing (seconds) ────────────────────────────────────────
 LOOKAHEAD_HOURS: int = 4
 DISCOVERY_INTERVAL_S: int = 300       # discover new rounds every 5 min
 FILL_CHECK_INTERVAL_S: float = 1.0    # check fills every 1s (only active round polled)
-EXIT_DEADLINE_S: int = 90            # emergency exit when < 90s (1.5min) left in round
+EXIT_DEADLINE_S: int = 90            # tier 4 stop-loss when < 90s (1.5min) left in round
 BRAKE_PAUSE_S: int = 3600            # pause mode: cancel orders within this window (1 hour)
 
 # ── Budget ───────────────────────────────────────────────────

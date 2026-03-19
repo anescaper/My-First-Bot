@@ -225,6 +225,8 @@ def check_fills(client: ClobClient, conn: sqlite3.Connection) -> list[Order]:
                 entry_price=order.price, entry_size=matched,
                 entry_order=order.order_id,
                 sell_order=sell_oid, sell_price=C.SELL_TARGET if sell_oid else None,
+                sell_placed_at=now if sell_oid else None,
+                filled_at=now,
                 status="exiting" if sell_oid else "open",
                 opened_at=now,
             )

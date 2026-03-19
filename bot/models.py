@@ -46,7 +46,9 @@ class Position:
     entry_order: str        # BUY order ID
     sell_order: Optional[str] = None
     sell_price: Optional[float] = None
-    status: str = "open"    # open/exiting/closed
+    sell_placed_at: Optional[int] = None  # when the current sell order was placed
+    filled_at: Optional[int] = None       # when the BUY filled (position opened)
+    status: str = "open"    # open/exiting/fallback/stepdown/emergency/closed
     pnl: Optional[float] = None
     opened_at: int = 0
     closed_at: Optional[int] = None

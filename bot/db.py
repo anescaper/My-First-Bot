@@ -62,19 +62,21 @@ def init_db() -> sqlite3.Connection:
             ON orders(order_type, status);
 
         CREATE TABLE IF NOT EXISTS positions (
-            id          INTEGER PRIMARY KEY AUTOINCREMENT,
-            round_ts    INTEGER NOT NULL,
-            asset       TEXT    NOT NULL,
-            token_side  TEXT    NOT NULL,
-            entry_price REAL,
-            entry_size  REAL,
-            entry_order TEXT,
-            sell_order  TEXT,
-            sell_price  REAL,
-            status      TEXT    DEFAULT 'open',
-            pnl         REAL,
-            opened_at   INTEGER,
-            closed_at   INTEGER
+            id              INTEGER PRIMARY KEY AUTOINCREMENT,
+            round_ts        INTEGER NOT NULL,
+            asset           TEXT    NOT NULL,
+            token_side      TEXT    NOT NULL,
+            entry_price     REAL,
+            entry_size      REAL,
+            entry_order     TEXT,
+            sell_order      TEXT,
+            sell_price      REAL,
+            sell_placed_at  INTEGER,
+            filled_at       INTEGER,
+            status          TEXT    DEFAULT 'open',
+            pnl             REAL,
+            opened_at       INTEGER,
+            closed_at       INTEGER
         );
         CREATE INDEX IF NOT EXISTS idx_positions_status
             ON positions(status);
@@ -225,7 +227,7 @@ def sum_open_order_cost(conn: sqlite3.Connection) -> float:
 def sum_open_position_cost(conn: sqlite3.Connection) -> float:
     """Total capital locked in open positions (entry_price × entry_size)."""
     return conn.execute(
-        "SELECT COALESCE(SUM(entry_price * entry_size), 0) FROM positions WHERE status IN ('open', 'exiting', 'stepdown', 'emergency')"
+        "SELECT COALESCE(SUM(entry_price * entry_size), 0) FROM positions WHERE status IN ('open', 'exiting', 'fallback', 'stepdown', 'emergency')"
     ).fetchone()[0]
 
 
@@ -235,10 +237,12 @@ def insert_position(conn: sqlite3.Connection, p: Position) -> int:
     cur = conn.execute(
         """INSERT INTO positions
            (round_ts, asset, token_side, entry_price, entry_size,
-            entry_order, sell_order, sell_price, status, opened_at)
-           VALUES (?,?,?,?,?,?,?,?,?,?)""",
+            entry_order, sell_order, sell_price, sell_placed_at, filled_at,
+            status, opened_at)
+           VALUES (?,?,?,?,?,?,?,?,?,?,?,?)""",
         (p.round_ts, p.asset, p.token_side, p.entry_price, p.entry_size,
-         p.entry_order, p.sell_order, p.sell_price, p.status, p.opened_at)
+         p.entry_order, p.sell_order, p.sell_price, p.sell_placed_at,
+         p.filled_at, p.status, p.opened_at)
     )
     return cur.lastrowid
 
@@ -254,7 +258,7 @@ def get_positions_for_round(conn: sqlite3.Connection, round_ts: int, asset: str)
 
 def get_open_positions(conn: sqlite3.Connection) -> list[Position]:
     rows = conn.execute(
-        "SELECT * FROM positions WHERE status IN ('open', 'exiting', 'stepdown', 'emergency')"
+        "SELECT * FROM positions WHERE status IN ('open', 'exiting', 'fallback', 'stepdown', 'emergency')"
     ).fetchall()
     return [Position(**dict(r)) for r in rows]
 
@@ -270,9 +274,10 @@ def close_position(conn: sqlite3.Connection, pos_id: int,
 
 def update_position_sell(conn: sqlite3.Connection, pos_id: int,
                          sell_order: str, sell_price: float) -> None:
+    import time
     conn.execute(
-        "UPDATE positions SET sell_order=?, sell_price=?, status='exiting' WHERE id=?",
-        (sell_order, sell_price, pos_id)
+        "UPDATE positions SET sell_order=?, sell_price=?, sell_placed_at=?, status='exiting' WHERE id=?",
+        (sell_order, sell_price, int(time.time()), pos_id)
     )
 
 
@@ -294,7 +299,7 @@ def total_pnl(conn: sqlite3.Connection) -> float:
 
 def count_open_positions(conn: sqlite3.Connection) -> int:
     return conn.execute(
-        "SELECT COUNT(*) FROM positions WHERE status IN ('open', 'exiting', 'stepdown', 'emergency')"
+        "SELECT COUNT(*) FROM positions WHERE status IN ('open', 'exiting', 'fallback', 'stepdown', 'emergency')"
     ).fetchone()[0]
 
 
