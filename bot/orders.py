@@ -249,6 +249,48 @@ def check_fills(client: ClobClient, conn: sqlite3.Connection) -> list[Order]:
     return filled
 
 
+def cancel_stale_buys(client: ClobClient, conn: sqlite3.Connection) -> int:
+    """
+    Cancel unfilled BUY orders if 58+ seconds have elapsed in the current round.
+
+    Insight: If price hasn't reached $0.27 in the first 58 seconds, it means
+    the market has already committed to one direction. Late fills (after T+58s)
+    are trap fills — one-sided, no reversion expected. Cancel before they fill.
+
+    Returns:
+        Number of orders cancelled
+    """
+    now = int(time.time())
+    current_round_ts = (now // C.ROUND_DURATION_S) * C.ROUND_DURATION_S
+    elapsed = now - current_round_ts
+
+    if elapsed < C.STALE_BUY_CUTOFF_S:
+        return 0
+
+    # Get open BUY orders for the current round that haven't filled
+    open_buys = db.get_active_round_orders(conn, current_round_ts, order_type="BUY")
+    if not open_buys:
+        return 0
+
+    count = 0
+    for order in open_buys:
+        if order.status != "open":
+            continue
+        # Check if we already have a position for this round+asset
+        existing = db.get_positions_for_round(conn, order.round_ts, order.asset)
+        if existing:
+            continue  # already filled on one side, don't cancel
+        if cancel_order(client, order.order_id):
+            db.update_order_status(conn, order.order_id, "cancelled")
+            count += 1
+
+    if count > 0:
+        conn.commit()
+        log.info(f"⏰ T+{elapsed}s: Cancelled {count} unfilled BUY orders (late fill protection)")
+
+    return count
+
+
 def cancel_all(client: ClobClient, conn: sqlite3.Connection) -> int:
     """Cancel ALL open orders. Returns count."""
     open_orders = db.get_open_orders(conn)

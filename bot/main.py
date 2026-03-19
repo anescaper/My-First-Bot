@@ -14,7 +14,7 @@ import config as C
 import db
 from client import create_client
 from discovery import discover_rounds
-from orders import place_preorders, check_fills, cancel_all, cancel_inactive_buys, cancel_near_term_buys
+from orders import place_preorders, check_fills, cancel_all, cancel_inactive_buys, cancel_near_term_buys, cancel_stale_buys
 from signals import process_signals
 from exits import manage_exits
 from cleanup import cleanup_old_rounds
@@ -175,6 +175,10 @@ def main():
                     open_pos = db.count_open_positions(conn)
                     if open_pos > 0:
                         trading_paused = False  # keep exits alive until positions close
+
+            # ── Cancel stale BUYs: after 58s, unfilled BUYs are traps ──
+            if not trading_paused:
+                cancel_stale_buys(client, conn)
 
             # ── Fill check: every 1s ──────────────────────────
             if not trading_paused and now - last_fill_check > C.FILL_CHECK_INTERVAL_S:

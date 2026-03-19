@@ -36,6 +36,7 @@ BUY_SIZE: int = 19
 EMERGENCY_SELL_PRICE: float = 0.15    # tier 4: stop-loss (not $0.01)
 
 # ── Timing (seconds) ────────────────────────────────────────
+STALE_BUY_CUTOFF_S: int = 58         # cancel unfilled BUYs after this many seconds into round
 LOOKAHEAD_HOURS: int = 4
 DISCOVERY_INTERVAL_S: int = 300       # discover new rounds every 5 min
 FILL_CHECK_INTERVAL_S: float = 1.0    # check fills every 1s (only active round polled)
