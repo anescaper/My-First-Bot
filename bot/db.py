@@ -360,7 +360,7 @@ def count_round_failures(conn: sqlite3.Connection, round_ts: int) -> int:
     return sum(1 for v in summary.values() if v["result"] == "failure")
 
 
-def get_brake_failures(conn: sqlite3.Connection, current_round_ts: int) -> list[tuple[str, int]]:
+def get_pause_failures(conn: sqlite3.Connection, current_round_ts: int) -> list[tuple[str, int]]:
     """Check current round + previous round for failures.
     Returns list of (asset, round_ts) that failed."""
     import config as C
@@ -378,7 +378,7 @@ def get_brake_failures(conn: sqlite3.Connection, current_round_ts: int) -> list[
 
 def get_inactive_buy_orders(conn: sqlite3.Connection, current_round_ts: int) -> list[Order]:
     """Get open BUY orders for rounds that are NOT currently active.
-    These are future pre-orders that should be cancelled during brake."""
+    These are future pre-orders that should be cancelled during pause."""
     rows = conn.execute(
         "SELECT * FROM orders WHERE status='open' AND order_type='BUY' AND round_ts != ?",
         (current_round_ts,)
@@ -389,7 +389,7 @@ def get_inactive_buy_orders(conn: sqlite3.Connection, current_round_ts: int) -> 
 def get_near_term_buy_orders(conn: sqlite3.Connection, current_round_ts: int,
                               window_s: int = 3600) -> list[Order]:
     """Get open BUY orders for rounds within the next `window_s` seconds.
-    Used by PAUSE mode brake: cancel near-term orders but keep far-future ones.
+    Used by PAUSE mode: cancel near-term orders but keep far-future ones.
     Excludes the currently active round (that's managed by exits)."""
     cutoff_ts = current_round_ts + window_s
     rows = conn.execute(

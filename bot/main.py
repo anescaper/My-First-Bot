@@ -59,7 +59,7 @@ def main():
     client = create_client()
 
     # Wipe DB on startup — all real orders are cancelled anyway, stale DB state
-    # causes ghost orders, fake brake triggers, and skipped rounds
+    # causes ghost orders, fake pause triggers, and skipped rounds
     db.wipe_db()
     conn = db.init_db()
     log.info("Startup: DB wiped (clean slate)")
@@ -78,8 +78,8 @@ def main():
     last_exit_check = 0
     last_stats = 0
     last_round_summary = 0   # track which round we last logged
-    brake_active = False
-    brake_activated_at = 0
+    pause_active = False
+    pause_activated_at = 0
     tick = 0
 
     while not _shutdown:
@@ -95,12 +95,12 @@ def main():
                 _log_round_summary(conn, prev_round_ts)
                 last_round_summary = prev_round_ts
 
-                # ── Emergency brake: check prev + prev-prev round ──
-                # 2 rounds × 4 assets = 8 positions. If 2+ failures → brake
-                failures = db.get_brake_failures(conn, prev_round_ts)
-                if len(failures) >= 2 and not brake_active:
-                    brake_active = True
-                    brake_activated_at = now
+                # ── Emergency pause: check prev + prev-prev round ──
+                # 2 rounds × 4 assets = 8 positions. If 2+ failures → pause
+                failures = db.get_pause_failures(conn, prev_round_ts)
+                if len(failures) >= 2 and not pause_active:
+                    pause_active = True
+                    pause_activated_at = now
                     failed_desc = ", ".join(f"{a}@{ts}" for a, ts in failures)
                     log.warning(
                         f"⏸️ PAUSE MODE: {len(failures)} failures "
@@ -112,8 +112,8 @@ def main():
                         f"keeping far-future orders + discovery alive"
                     )
                     cancel_near_term_buys(client, conn)
-                elif len(failures) < 2 and brake_active:
-                    brake_active = False
+                elif len(failures) < 2 and pause_active:
+                    pause_active = False
                     log.info("✅ Pause mode released — resuming full operation")
 
             # ── Discovery + pre-orders: ALWAYS run (even during pause) ──
@@ -135,7 +135,7 @@ def main():
 
                     # During pause: continuously cancel near-term orders
                     # (new ones may have been placed by pre-orders)
-                    if brake_active:
+                    if pause_active:
                         cancel_near_term_buys(client, conn)
 
             # ── Signals: every tick (log only, no cancellation) ──

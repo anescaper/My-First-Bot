@@ -8,7 +8,7 @@ Exit logic (unified for all assets, v5):
     4. Round expired: cancel sell, book loss
 
 Failure definition: sell_revenue < buy_cost ($0.27 × 19 = $5.13)
-If 2+ failures across current + previous round → emergency brake in main.py
+If 2+ failures across current + previous round → emergency pause in main.py
 
 To extend: add new exit strategies (trailing stop, etc.) here.
 """
