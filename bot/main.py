@@ -79,7 +79,7 @@ def main():
     last_stats = 0
     last_round_summary = 0   # track which round we last logged
     pause_active = False
-    pause_activated_at = 0
+    pause_round_ts = 0       # round_ts when pause was triggered
     tick = 0
 
     while not _shutdown:
@@ -100,20 +100,20 @@ def main():
                 failures = db.get_pause_failures(conn, prev_round_ts)
                 if len(failures) >= 2 and not pause_active:
                     pause_active = True
-                    pause_activated_at = now
+                    pause_round_ts = current_round_ts  # pause starts at THIS round
                     failed_desc = ", ".join(f"{a}@{ts}" for a, ts in failures)
                     log.warning(
                         f"⏸️ PAUSE MODE: {len(failures)} failures "
                         f"in last 2 rounds ({failed_desc})"
                     )
                     log.warning(
-                        f"⏸️ Cancelling orders within next "
-                        f"{C.BRAKE_PAUSE_S // 60} min — "
-                        f"keeping far-future orders + discovery alive"
+                        f"⏸️ Trading halts after round {pause_round_ts + C.ROUND_DURATION_S} "
+                        f"(current + next). Dead zone: next {C.BRAKE_PAUSE_S // 60} min."
                     )
                     cancel_near_term_buys(client, conn)
                 elif len(failures) < 2 and pause_active:
                     pause_active = False
+                    pause_round_ts = 0
                     log.info("✅ Pause mode released — resuming full operation")
 
             # ── Discovery + pre-orders: ALWAYS run (even during pause) ──
@@ -141,13 +141,28 @@ def main():
             # ── Signals: every tick (log only, no cancellation) ──
             process_signals(conn)
 
-            # ── Fill check: every 3s ─────────────────────────
-            if now - last_fill_check > C.FILL_CHECK_INTERVAL_S:
+            # ── Determine if trading is paused ──
+            # During pause: allow trading only for the trigger round and
+            # the next round (grace period). After that, halt fill checks
+            # and exit management. Pending order manager keeps running.
+            trading_paused = False
+            if pause_active:
+                # Grace period: current round when pause triggered + next round
+                grace_deadline = pause_round_ts + C.ROUND_DURATION_S
+                if current_round_ts > grace_deadline:
+                    trading_paused = True
+                    # Still manage any remaining open positions from grace period
+                    open_pos = db.count_open_positions(conn)
+                    if open_pos > 0:
+                        trading_paused = False  # keep exits alive until positions close
+
+            # ── Fill check: every 1s ──────────────────────────
+            if not trading_paused and now - last_fill_check > C.FILL_CHECK_INTERVAL_S:
                 check_fills(client, conn)
                 last_fill_check = now
 
             # ── Exit management: every 5s ────────────────────
-            if now - last_exit_check > 5:
+            if not trading_paused and now - last_exit_check > 5:
                 manage_exits(client, conn)
                 last_exit_check = now
 
