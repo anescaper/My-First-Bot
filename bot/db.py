@@ -238,11 +238,11 @@ def insert_position(conn: sqlite3.Connection, p: Position) -> int:
         """INSERT INTO positions
            (round_ts, asset, token_side, entry_price, entry_size,
             entry_order, sell_order, sell_price, sell_placed_at, filled_at,
-            status, opened_at)
-           VALUES (?,?,?,?,?,?,?,?,?,?,?,?)""",
+            status, pnl, opened_at)
+           VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)""",
         (p.round_ts, p.asset, p.token_side, p.entry_price, p.entry_size,
          p.entry_order, p.sell_order, p.sell_price, p.sell_placed_at,
-         p.filled_at, p.status, p.opened_at)
+         p.filled_at, p.status, p.pnl, p.opened_at)
     )
     return cur.lastrowid
 
@@ -274,9 +274,11 @@ def close_position(conn: sqlite3.Connection, pos_id: int,
 
 def update_position_sell(conn: sqlite3.Connection, pos_id: int,
                          sell_order: str, sell_price: float) -> None:
+    """Update sell order details. Does NOT change status — caller must
+    set status explicitly via update_position_status()."""
     import time
     conn.execute(
-        "UPDATE positions SET sell_order=?, sell_price=?, sell_placed_at=?, status='exiting' WHERE id=?",
+        "UPDATE positions SET sell_order=?, sell_price=?, sell_placed_at=? WHERE id=?",
         (sell_order, sell_price, int(time.time()), pos_id)
     )
 

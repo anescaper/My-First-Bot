@@ -94,7 +94,8 @@ def manage_exits(client: ClobClient, conn: sqlite3.Connection) -> int:
         # Only fires for "exiting" status (tier 1 sell at $0.48).
         # If 30s have passed since sell was placed and it hasn't filled,
         # cancel and replace with $0.35.
-        if pos.status == "exiting" and time_left > C.SELL_STEPDOWN_S:
+        # Guard: don't fire within 5s of tier 3 boundary to prevent race.
+        if pos.status == "exiting" and time_left > (C.SELL_STEPDOWN_S + 5):
             sell_age = now - (pos.sell_placed_at or pos.filled_at or now)
             if sell_age >= C.SELL_FALLBACK_S:
                 rnd = db.get_round(conn, pos.round_ts, pos.asset)
